@@ -110,19 +110,19 @@ ClockSweepTick(void)
 	uint32		victim;
 
 	/*
-	 * Atomically move hand ahead one buffer - if there's several processes
+	 * Atomically move hand back one buffer - if there's several processes
 	 * doing this, this can lead to buffers being returned slightly out of
 	 * apparent order.
 	 */
 	victim =
-		pg_atomic_fetch_add_u32(&StrategyControl->nextVictimBuffer, 1);
+		pg_atomic_fetch_sub_u32(&StrategyControl->nextVictimBuffer, 1);
 
 	if (victim >= NBuffers)
 	{
 		uint32		originalVictim = victim;
 
 		/* always wrap what we look up in BufferDescriptors */
-		victim = victim % NBuffers;
+		victim = (victim + NBuffers) % NBuffers;
 
 		/*
 		 * If we're the one that just caused a wraparound, force
@@ -130,13 +130,13 @@ ClockSweepTick(void)
 		 * need the spinlock so StrategySyncStart() can return a consistent
 		 * value consisting of nextVictimBuffer and completePasses.
 		 */
-		if (victim == 0)
+		if (victim == (NBuffers - 1))
 		{
 			uint32		expected;
 			uint32		wrapped;
 			bool		success = false;
 
-			expected = originalVictim + 1;
+			expected = originalVictim - 1;
 
 			while (!success)
 			{
@@ -150,7 +150,7 @@ ClockSweepTick(void)
 				 */
 				SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 
-				wrapped = expected % NBuffers;
+				wrapped = (expected + NBuffers) % NBuffers;
 
 				success = pg_atomic_compare_exchange_u32(&StrategyControl->nextVictimBuffer,
 														 &expected, wrapped);
@@ -512,7 +512,7 @@ StrategyInitialize(bool init)
 		StrategyControl->lastFreeBuffer = NBuffers - 1;
 
 		/* Initialize the clock sweep pointer */
-		pg_atomic_init_u32(&StrategyControl->nextVictimBuffer, 0);
+		pg_atomic_init_u32(&StrategyControl->nextVictimBuffer, NBuffers - 1);
 
 		/* Clear statistics */
 		StrategyControl->completePasses = 0;

@@ -2308,6 +2308,7 @@ process_pm_child_exit(void)
 			/* at this point we are really open for business */
 			ereport(LOG,
 					(errmsg("database system is ready to accept connections")));
+			ereport(LOG, errmsg("Sami woz here"));
 
 			/* Report status */
 			AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_READY);
