@@ -45,3 +45,8 @@ lib*.pc
 /portlock/
 
 build/
+.DS_STORE
+db_log.log
+*.diffs
+*.out
+.vscode

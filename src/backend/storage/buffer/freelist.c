@@ -28,7 +28,7 @@
  * The shared freelist control information.
  */
 typedef struct
-{
+{	
 	/* Spinlock: protects the values below */
 	slock_t		buffer_strategy_lock;
 
@@ -59,6 +59,8 @@ typedef struct
 	 * StrategyNotifyBgWriter.
 	 */
 	int			bgwprocno;
+
+	uint32 victimOrderings[FLEXIBLE_ARRAY_MEMBER];
 } BufferStrategyControl;
 
 /* Pointers to shared state */
@@ -200,6 +202,9 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	int			trycounter;
 	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
 
+	uint32 orderingIndex;
+	uint32 buf_id;
+
 	*from_ring = false;
 
 	/*
@@ -315,7 +320,11 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	trycounter = NBuffers;
 	for (;;)
 	{
-		buf = GetBufferDescriptor(ClockSweepTick());
+		orderingIndex = ClockSweepTick();
+		SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+		buf_id = StrategyControl->victimOrderings[orderingIndex];
+		SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+		buf = GetBufferDescriptor(buf_id);
 
 		/*
 		 * If the buffer is pinned or has a nonzero usage_count, we cannot use
@@ -337,6 +346,18 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
+				/* Reorder */
+				SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+				// ereport(LOG, errmsg("vo %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", StrategyControl->victimOrderings[0], StrategyControl->victimOrderings[1], StrategyControl->victimOrderings[2], StrategyControl->victimOrderings[3], StrategyControl->victimOrderings[4], StrategyControl->victimOrderings[5], StrategyControl->victimOrderings[6], StrategyControl->victimOrderings[7], StrategyControl->victimOrderings[8], StrategyControl->victimOrderings[9], StrategyControl->victimOrderings[10], StrategyControl->victimOrderings[11], StrategyControl->victimOrderings[12], StrategyControl->victimOrderings[13], StrategyControl->victimOrderings[14], StrategyControl->victimOrderings[15], StrategyControl->victimOrderings[16], StrategyControl->victimOrderings[17], StrategyControl->victimOrderings[18], StrategyControl->victimOrderings[19], StrategyControl->victimOrderings[20], StrategyControl->victimOrderings[21], StrategyControl->victimOrderings[22], StrategyControl->victimOrderings[23], StrategyControl->victimOrderings[24], StrategyControl->victimOrderings[25], StrategyControl->victimOrderings[26], StrategyControl->victimOrderings[27], StrategyControl->victimOrderings[28], StrategyControl->victimOrderings[29], StrategyControl->victimOrderings[30], StrategyControl->victimOrderings[31], StrategyControl->victimOrderings[32], StrategyControl->victimOrderings[33], StrategyControl->victimOrderings[34], StrategyControl->victimOrderings[35], StrategyControl->victimOrderings[36], StrategyControl->victimOrderings[37], StrategyControl->victimOrderings[38], StrategyControl->victimOrderings[39], StrategyControl->victimOrderings[40], StrategyControl->victimOrderings[41], StrategyControl->victimOrderings[42], StrategyControl->victimOrderings[43], StrategyControl->victimOrderings[44], StrategyControl->victimOrderings[45], StrategyControl->victimOrderings[46], StrategyControl->victimOrderings[47], StrategyControl->victimOrderings[48], StrategyControl->victimOrderings[49], StrategyControl->victimOrderings[50], StrategyControl->victimOrderings[51], StrategyControl->victimOrderings[52], StrategyControl->victimOrderings[53], StrategyControl->victimOrderings[54], StrategyControl->victimOrderings[55], StrategyControl->victimOrderings[56], StrategyControl->victimOrderings[57], StrategyControl->victimOrderings[58], StrategyControl->victimOrderings[59], StrategyControl->victimOrderings[60], StrategyControl->victimOrderings[61], StrategyControl->victimOrderings[62], StrategyControl->victimOrderings[63], StrategyControl->victimOrderings[64], StrategyControl->victimOrderings[65], StrategyControl->victimOrderings[66], StrategyControl->victimOrderings[67], StrategyControl->victimOrderings[68], StrategyControl->victimOrderings[69], StrategyControl->victimOrderings[70], StrategyControl->victimOrderings[71], StrategyControl->victimOrderings[72], StrategyControl->victimOrderings[73], StrategyControl->victimOrderings[74], StrategyControl->victimOrderings[75], StrategyControl->victimOrderings[76], StrategyControl->victimOrderings[77], StrategyControl->victimOrderings[78], StrategyControl->victimOrderings[79], StrategyControl->victimOrderings[80], StrategyControl->victimOrderings[81], StrategyControl->victimOrderings[82], StrategyControl->victimOrderings[83], StrategyControl->victimOrderings[84], StrategyControl->victimOrderings[85], StrategyControl->victimOrderings[86], StrategyControl->victimOrderings[87], StrategyControl->victimOrderings[88], StrategyControl->victimOrderings[89], StrategyControl->victimOrderings[90], StrategyControl->victimOrderings[91], StrategyControl->victimOrderings[92], StrategyControl->victimOrderings[93], StrategyControl->victimOrderings[94], StrategyControl->victimOrderings[95], StrategyControl->victimOrderings[96], StrategyControl->victimOrderings[97], StrategyControl->victimOrderings[98], StrategyControl->victimOrderings[99], StrategyControl->victimOrderings[100], StrategyControl->victimOrderings[101], StrategyControl->victimOrderings[102], StrategyControl->victimOrderings[103], StrategyControl->victimOrderings[104], StrategyControl->victimOrderings[105], StrategyControl->victimOrderings[106], StrategyControl->victimOrderings[107], StrategyControl->victimOrderings[108], StrategyControl->victimOrderings[109], StrategyControl->victimOrderings[110], StrategyControl->victimOrderings[111], StrategyControl->victimOrderings[112], StrategyControl->victimOrderings[113], StrategyControl->victimOrderings[114], StrategyControl->victimOrderings[115], StrategyControl->victimOrderings[116], StrategyControl->victimOrderings[117], StrategyControl->victimOrderings[118], StrategyControl->victimOrderings[119], StrategyControl->victimOrderings[120], StrategyControl->victimOrderings[121], StrategyControl->victimOrderings[122], StrategyControl->victimOrderings[123], StrategyControl->victimOrderings[124], StrategyControl->victimOrderings[125], StrategyControl->victimOrderings[126], StrategyControl->victimOrderings[127]));
+				int temp = StrategyControl->victimOrderings[orderingIndex];
+				memmove(&StrategyControl->victimOrderings[1], &StrategyControl->victimOrderings[0], orderingIndex * sizeof(int));
+				StrategyControl->victimOrderings[0] = temp;
+				// ereport(LOG, errmsg("vo %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", StrategyControl->victimOrderings[0], StrategyControl->victimOrderings[1], StrategyControl->victimOrderings[2], StrategyControl->victimOrderings[3], StrategyControl->victimOrderings[4], StrategyControl->victimOrderings[5], StrategyControl->victimOrderings[6], StrategyControl->victimOrderings[7], StrategyControl->victimOrderings[8], StrategyControl->victimOrderings[9], StrategyControl->victimOrderings[10], StrategyControl->victimOrderings[11], StrategyControl->victimOrderings[12], StrategyControl->victimOrderings[13], StrategyControl->victimOrderings[14], StrategyControl->victimOrderings[15], StrategyControl->victimOrderings[16], StrategyControl->victimOrderings[17], StrategyControl->victimOrderings[18], StrategyControl->victimOrderings[19], StrategyControl->victimOrderings[20], StrategyControl->victimOrderings[21], StrategyControl->victimOrderings[22], StrategyControl->victimOrderings[23], StrategyControl->victimOrderings[24], StrategyControl->victimOrderings[25], StrategyControl->victimOrderings[26], StrategyControl->victimOrderings[27], StrategyControl->victimOrderings[28], StrategyControl->victimOrderings[29], StrategyControl->victimOrderings[30], StrategyControl->victimOrderings[31], StrategyControl->victimOrderings[32], StrategyControl->victimOrderings[33], StrategyControl->victimOrderings[34], StrategyControl->victimOrderings[35], StrategyControl->victimOrderings[36], StrategyControl->victimOrderings[37], StrategyControl->victimOrderings[38], StrategyControl->victimOrderings[39], StrategyControl->victimOrderings[40], StrategyControl->victimOrderings[41], StrategyControl->victimOrderings[42], StrategyControl->victimOrderings[43], StrategyControl->victimOrderings[44], StrategyControl->victimOrderings[45], StrategyControl->victimOrderings[46], StrategyControl->victimOrderings[47], StrategyControl->victimOrderings[48], StrategyControl->victimOrderings[49], StrategyControl->victimOrderings[50], StrategyControl->victimOrderings[51], StrategyControl->victimOrderings[52], StrategyControl->victimOrderings[53], StrategyControl->victimOrderings[54], StrategyControl->victimOrderings[55], StrategyControl->victimOrderings[56], StrategyControl->victimOrderings[57], StrategyControl->victimOrderings[58], StrategyControl->victimOrderings[59], StrategyControl->victimOrderings[60], StrategyControl->victimOrderings[61], StrategyControl->victimOrderings[62], StrategyControl->victimOrderings[63], StrategyControl->victimOrderings[64], StrategyControl->victimOrderings[65], StrategyControl->victimOrderings[66], StrategyControl->victimOrderings[67], StrategyControl->victimOrderings[68], StrategyControl->victimOrderings[69], StrategyControl->victimOrderings[70], StrategyControl->victimOrderings[71], StrategyControl->victimOrderings[72], StrategyControl->victimOrderings[73], StrategyControl->victimOrderings[74], StrategyControl->victimOrderings[75], StrategyControl->victimOrderings[76], StrategyControl->victimOrderings[77], StrategyControl->victimOrderings[78], StrategyControl->victimOrderings[79], StrategyControl->victimOrderings[80], StrategyControl->victimOrderings[81], StrategyControl->victimOrderings[82], StrategyControl->victimOrderings[83], StrategyControl->victimOrderings[84], StrategyControl->victimOrderings[85], StrategyControl->victimOrderings[86], StrategyControl->victimOrderings[87], StrategyControl->victimOrderings[88], StrategyControl->victimOrderings[89], StrategyControl->victimOrderings[90], StrategyControl->victimOrderings[91], StrategyControl->victimOrderings[92], StrategyControl->victimOrderings[93], StrategyControl->victimOrderings[94], StrategyControl->victimOrderings[95], StrategyControl->victimOrderings[96], StrategyControl->victimOrderings[97], StrategyControl->victimOrderings[98], StrategyControl->victimOrderings[99], StrategyControl->victimOrderings[100], StrategyControl->victimOrderings[101], StrategyControl->victimOrderings[102], StrategyControl->victimOrderings[103], StrategyControl->victimOrderings[104], StrategyControl->victimOrderings[105], StrategyControl->victimOrderings[106], StrategyControl->victimOrderings[107], StrategyControl->victimOrderings[108], StrategyControl->victimOrderings[109], StrategyControl->victimOrderings[110], StrategyControl->victimOrderings[111], StrategyControl->victimOrderings[112], StrategyControl->victimOrderings[113], StrategyControl->victimOrderings[114], StrategyControl->victimOrderings[115], StrategyControl->victimOrderings[116], StrategyControl->victimOrderings[117], StrategyControl->victimOrderings[118], StrategyControl->victimOrderings[119], StrategyControl->victimOrderings[120], StrategyControl->victimOrderings[121], StrategyControl->victimOrderings[122], StrategyControl->victimOrderings[123], StrategyControl->victimOrderings[124], StrategyControl->victimOrderings[125], StrategyControl->victimOrderings[126], StrategyControl->victimOrderings[127]));
+				SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+
+				// ereport(LOG, errmsg("eviction"));
+
 				return buf;
 			}
 		}
@@ -492,9 +513,12 @@ StrategyInitialize(bool init)
 	 */
 	StrategyControl = (BufferStrategyControl *)
 		ShmemInitStruct("Buffer Strategy Status",
-						sizeof(BufferStrategyControl),
+						offsetof(BufferStrategyControl, victimOrderings) + (NBuffers * sizeof(uint32)),
 						&found);
 
+	// strategy = (BufferAccessStrategy)
+	// 	palloc0(offsetof(BufferAccessStrategyData, buffers) +
+	// 			ring_buffers * sizeof(Buffer));
 	if (!found)
 	{
 		/*
@@ -520,6 +544,12 @@ StrategyInitialize(bool init)
 
 		/* No pending notification */
 		StrategyControl->bgwprocno = -1;
+
+		for (int i = 0; i < NBuffers; i++) {
+			StrategyControl->victimOrderings[i] = i;
+		}
+
+		ereport(LOG, errmsg("nbuffers is %i", NBuffers));
 	}
 	else
 		Assert(!init);
@@ -698,6 +728,8 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint32 *buf_state)
 	Buffer		bufnum;
 	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
 
+	uint32 buf_id;
+
 
 	/* Advance to next ring slot */
 	if (++strategy->current >= strategy->nbuffers)
@@ -721,7 +753,11 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint32 *buf_state)
 	 * higher usage_count indicates someone else has touched the buffer, so we
 	 * shouldn't re-use it.
 	 */
-	buf = GetBufferDescriptor(bufnum - 1);
+	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+	buf_id = StrategyControl->victimOrderings[bufnum - 1];
+	SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+	buf = GetBufferDescriptor(buf_id);
+
 	local_buf_state = LockBufHdr(buf);
 	if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
 		&& BUF_STATE_GET_USAGECOUNT(local_buf_state) <= 1)
