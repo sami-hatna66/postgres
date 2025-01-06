@@ -75,7 +75,7 @@
  * clock sweeps to find a free buffer, so in practice we don't want the
  * value to be very large.
  */
-#define BM_MAX_USAGE_COUNT	5
+#define BM_MAX_USAGE_COUNT	3
 
 /*
  * Buffer tag identifies which disk block the buffer contains.
@@ -421,7 +421,7 @@ extern void ScheduleBufferTagForWriteback(WritebackContext *wb_context,
 /* freelist.c */
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
 extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
-									 uint32 *buf_state, bool *from_ring);
+									 uint32 *buf_state, bool *from_ring, uint32 tagHash);
 extern void StrategyFreeBuffer(BufferDesc *buf);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, bool from_ring);

@@ -61,8 +61,27 @@ typedef struct
 	int			bgwprocno;
 } BufferStrategyControl;
 
+typedef struct 
+{
+	int tag;
+	int bufferDescIndex;
+} RingBufferEntry;
+
+typedef struct 
+{
+	slock_t ring_buffer_lock;
+	int head;
+	int tail;
+	int currentSize;
+	int maxSize;
+	RingBufferEntry queue[FLEXIBLE_ARRAY_MEMBER];
+} BufferStrategyRingBuffer;
+
 /* Pointers to shared state */
 static BufferStrategyControl *StrategyControl = NULL;
+static BufferStrategyRingBuffer *S3MainQueue = NULL;
+static BufferStrategyRingBuffer *S3ProbationaryQueue = NULL;
+static BufferStrategyRingBuffer *S3GhostQueue = NULL;
 
 /*
  * Private (non-shared) state for managing a ring of shared buffers to re-use.
@@ -97,6 +116,79 @@ static BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
 									 uint32 *buf_state);
 static void AddBufferToRing(BufferAccessStrategy strategy,
 							BufferDesc *buf);
+
+/*
+ * Checks if ring buffer is full
+*/
+static inline bool IsRingBufferFull(BufferStrategyRingBuffer* rb) {
+	return rb->currentSize == rb->maxSize;
+}
+
+/*
+ * Checks if ring buffer is empty
+*/
+static inline bool IsRingBufferEmpty(BufferStrategyRingBuffer* rb) {
+	return rb->currentSize == 0;
+}
+
+/*
+ * Adds a new element to the ring buffer head
+ * If an item has to be evicted to make space, returns that item
+ * Else returns {-1, -1}
+*/
+static RingBufferEntry RingBufferEnqueue(BufferStrategyRingBuffer* rb, int tag, int idx) {
+	RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
+	if (IsRingBufferFull(rb)) {
+		victim = rb->queue[rb->tail];
+		rb->tail = (rb->tail + 1) % rb->maxSize;
+		rb->currentSize--;
+	}
+	rb->queue[rb->head].tag = tag;
+	rb->queue[rb->head].bufferDescIndex = idx;
+	rb->head = (rb->head + 1) % rb->maxSize;
+	rb->currentSize++;
+	return victim;
+}
+
+/*
+ * Search ringbuffer for a tag (hash)
+ * Returns index of hash in rb->queue or -1 if not found
+*/
+static int RingBufferSearchTag(BufferStrategyRingBuffer* rb, int tag) {
+	if (IsRingBufferEmpty(rb)) return -1;
+	int count = rb->currentSize;
+	int idx = rb->tail;
+	while (count > 0) {
+		if (rb->queue[idx].tag == tag) return idx;
+		idx = (idx + 1) % rb->maxSize;
+		count--;
+	}
+	return -1;
+}
+
+/*
+ * Deletes value from ring buffer based on hash
+ * Returns true if item was present and deleted, returns false if hash not found
+*/
+static bool RingBufferDeleteTag(BufferStrategyRingBuffer* rb, int tag) {
+	if (IsRingBufferEmpty(rb)) return false;
+
+	int idx = RingBufferSearchTag(rb, tag);
+	if (index == -1) return false;
+
+	int current = idx;
+	int next = (idx + 1) % rb->maxSize;
+	while (next != rb->head) {
+		rb->queue[current] = rb->queue[next];
+		current = next;
+		next = (next + 1) % rb->maxSize;
+	}
+
+	rb->head = (rb->head + rb->maxSize - 1) % rb->maxSize;
+	rb->currentSize--;
+
+	return true;
+}
 
 /*
  * ClockSweepTick - Helper routine for StrategyGetBuffer()
@@ -193,7 +285,7 @@ have_free_buffer(void)
  *	return the buffer with the buffer header spinlock still held.
  */
 BufferDesc *
-StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
+StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring, uint32 tagHash)
 {
 	BufferDesc *buf;
 	int			bgwprocno;
@@ -305,13 +397,35 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
+				/*
+				 * First time population for s3-fifo queue
+				 * Acquire locks
+				 * If hash in ghost queue, add [hash, StrategyControl->firstFreeBuffer] to main queue
+				 * Else add [hash, StrategyControl->firstFreeBuffer] to probationary queue
+				 * Also need to handle probationary-main crossings
+				 * If eviction from probationary doesn't go into main, add hash to ghost
+				*/
+				
+
 				return buf;
 			}
 			UnlockBufHdr(buf, local_buf_state);
 		}
 	}
 
-	/* Nothing on the freelist, so run the "clock sweep" algorithm */
+	/* 
+	 * If hash in ghost queue, remove from ghost and add [hash, buffer descriptor of evicted] to head of main
+	 * Else add to head of probationary
+	 * Also need to handle probationary-main crossings
+	 * Add evicted item hash to ghost queue
+	 * Return GetBufferDescriptor(bufferdescindex) of evicted item from end of probationary/main queue
+	 *        Use main if in ghost or evicted item from  prob has usage count > 0
+	 *        Use probationary if not in ghost and evicted item from prob has usage count 0
+	 * 
+	 * Will have to call RingBufferEnqueue, then modify entry with returned value
+	*/
+
 	trycounter = NBuffers;
 	for (;;)
 	{
@@ -495,6 +609,22 @@ StrategyInitialize(bool init)
 						sizeof(BufferStrategyControl),
 						&found);
 
+	int mainQueueSize = (NBuffers * 90) / 100;
+	S3MainQueue = (BufferStrategyRingBuffer *)
+		ShmemInitStruct("S3-FIFO main queue",
+						offsetof(BufferStrategyRingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
+						&found);
+
+	S3ProbationaryQueue = (BufferStrategyRingBuffer *)
+		ShmemInitStruct("S3-FIFO probationary queue",
+						offsetof(BufferStrategyRingBuffer, queue) + ((1 - mainQueueSize) * sizeof(RingBufferEntry)),
+						&found);
+
+	S3GhostQueue = (BufferStrategyRingBuffer *)
+		ShmemInitStruct("S3-FIFO ghost queue",
+						offsetof(BufferStrategyRingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
+						&found);
+
 	if (!found)
 	{
 		/*
@@ -520,6 +650,25 @@ StrategyInitialize(bool init)
 
 		/* No pending notification */
 		StrategyControl->bgwprocno = -1;
+
+		// INITIALIZE S3-FIFO QUEUES
+		SpinLockInit(&S3MainQueue->ring_buffer_lock);
+		S3MainQueue->head = 0;
+		S3MainQueue->tail = 0;
+		S3MainQueue->currentSize = 0;
+		S3MainQueue->maxSize = mainQueueSize;
+
+		SpinLockInit(&S3ProbationaryQueue->ring_buffer_lock);
+		S3ProbationaryQueue->head = 0;
+		S3ProbationaryQueue->tail = 0;
+		S3ProbationaryQueue->currentSize = 0;
+		S3ProbationaryQueue->maxSize = 1 - mainQueueSize;
+
+		SpinLockInit(&S3ProbationaryQueue->ring_buffer_lock);
+		S3ProbationaryQueue->head = 0;
+		S3ProbationaryQueue->tail = 0;
+		S3ProbationaryQueue->currentSize = 0;
+		S3ProbationaryQueue->maxSize = mainQueueSize;
 	}
 	else
 		Assert(!init);

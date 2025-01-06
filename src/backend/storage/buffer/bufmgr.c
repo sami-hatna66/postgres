@@ -524,7 +524,7 @@ static inline BufferDesc *BufferAlloc(SMgrRelation smgr,
 									  BlockNumber blockNum,
 									  BufferAccessStrategy strategy,
 									  bool *foundPtr, IOContext io_context);
-static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
+static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context, uint32 tagHash);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
 						IOObject io_object, IOContext io_context);
 static void FindAndDropRelationBuffers(RelFileLocator rlocator,
@@ -1673,7 +1673,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * don't hold any conflicting locks. If so we'll have to undo our work
 	 * later.
 	 */
-	victim_buffer = GetVictimBuffer(strategy, io_context);
+	victim_buffer = GetVictimBuffer(strategy, io_context, newHash);
 	victim_buf_hdr = GetBufferDescriptor(victim_buffer - 1);
 
 	/*
@@ -1947,7 +1947,7 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 }
 
 static Buffer
-GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
+GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context, uint32 tagHash)
 {
 	BufferDesc *buf_hdr;
 	Buffer		buf;
@@ -1968,7 +1968,7 @@ again:
 	 * Select a victim buffer.  The buffer is returned with its header
 	 * spinlock still held!
 	 */
-	buf_hdr = StrategyGetBuffer(strategy, &buf_state, &from_ring);
+	buf_hdr = StrategyGetBuffer(strategy, &buf_state, &from_ring, tagHash);
 	buf = BufferDescriptorGetBuffer(buf_hdr);
 
 	Assert(BUF_STATE_GET_REFCOUNT(buf_state) == 0);
@@ -2217,7 +2217,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 	{
 		Block		buf_block;
 
-		buffers[i] = GetVictimBuffer(strategy, io_context);
+		buffers[i] = GetVictimBuffer(strategy, io_context, 0);
 		buf_block = BufHdrGetBlock(GetBufferDescriptor(buffers[i] - 1));
 
 		/* new buffers are zero-filled */
