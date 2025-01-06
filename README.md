@@ -1,3 +1,5 @@
+THIS BRANCH ADDS SUPPORT FOR THE S3-FIFO BUFFER REPLACEMENT POLICY
+
 PostgreSQL Database Management System
 =====================================
 
