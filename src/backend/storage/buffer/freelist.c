@@ -229,23 +229,29 @@ static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int first
  * Returns true if item was present and deleted, returns false if hash not found
 */
 static bool RingBufferDeleteTag(BufferStrategyRingBuffer* rb, int tag) {
-	if (IsRingBufferEmpty(rb)) return false;
+    if (IsRingBufferEmpty(rb)) return false;
 
-	int idx = RingBufferSearchTag(rb, tag);
-	if (idx == -1) return false;
+    int idx = RingBufferSearchTag(rb, tag);
+    if (idx == -1) return false;
 
-	int current = idx;
-	int next = (idx + 1) % rb->maxSize;
-	while (next != rb->head) {
-		rb->queue[current] = rb->queue[next];
-		current = next;
-		next = (next + 1) % rb->maxSize;
-	}
+    int current = idx;
+    int next = (idx + 1) % rb->maxSize;
+    while (current != rb->head) {
+        rb->queue[current] = rb->queue[next];
+        current = next;
+        next = (next + 1) % rb->maxSize;
+    }
 
-	rb->head = (rb->head + rb->maxSize - 1) % rb->maxSize;
-	rb->currentSize--;
+    rb->head = (rb->head + rb->maxSize - 1) % rb->maxSize;
+    rb->currentSize--;
 
-	return true;
+    // Handle edge case of single element
+    if (rb->currentSize == 0) {
+        rb->head = 0;
+        rb->tail = 0;
+    }
+
+    return true;
 }
 
 /*
@@ -429,6 +435,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			}
 
 			buf = GetBufferDescriptor(StrategyControl->firstFreeBuffer);
+			int buf_idx = StrategyControl->firstFreeBuffer;
 			Assert(buf->freeNext != FREENEXT_NOT_IN_LIST);
 
 			/* Unconditionally remove buffer from freelist */
@@ -453,14 +460,12 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				&& BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0)
 			{
 				UnlockBufHdr(buf, local_buf_state);
-
 				/*
 				 * First time population for s3-fifo queue
 				 * If hash in ghost queue, add [hash, StrategyControl->firstFreeBuffer] to main queue
 				 * Else add [hash, StrategyControl->firstFreeBuffer] to probationary queue and handle
 				 * prob-main crossings
 				*/
-
 				SpinLockAcquire(&S3GhostQueue->ring_buffer_lock);
 				bool searchGhostQueue = RingBufferDeleteTag(S3GhostQueue, tagHash);
 				SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
@@ -468,7 +473,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				if (searchGhostQueue) {
 					// in ghost queue, add to main
 					SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
-					FifoReinsertion(S3MainQueue, tagHash, StrategyControl->firstFreeBuffer);
+					FifoReinsertion(S3MainQueue, tagHash, buf_idx);
 					SpinLockRelease(&S3MainQueue->ring_buffer_lock);
 				} else {
 					// not in ghost queue, add to probationary
@@ -485,134 +490,67 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 							FifoReinsertion(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
 							SpinLockRelease(&S3MainQueue->ring_buffer_lock);
 							ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
-						} else { // else add tag to ghost queue
+						} 
+						else { // else add tag to ghost queue
 							SpinLockAcquire(&S3GhostQueue->ring_buffer_lock);
 							RingBufferEnqueue(S3GhostQueue, evictedFromProbationary.tag, -1);
 							SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
-							ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 						}
 					}
 				}
-
 				local_buf_state = LockBufHdr(buf);
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
-
 				return buf;
 			}
 			UnlockBufHdr(buf, local_buf_state);
 		}
 	}
 
-	/* 
-	 * If hash in ghost queue, remove from ghost and add [hash, buffer descriptor of evicted] to head of main
-	 * Else add to head of probationary
-	 * Also need to handle probationary-main crossings
-	 * Add evicted item hash to ghost queue
-	 * Return GetBufferDescriptor(bufferdescindex) of evicted item from end of probationary/main queue
-	 *        Use main if in ghost or evicted item from  prob has usage count > 0
-	 *        Use probationary if not in ghost and evicted item from prob has usage count 0
-	 * 
-	 * Will have to call RingBufferEnqueue, then modify entry with returned value
-	*/
+	/* Nothing on the freelist, so run the "clock sweep" algorithm */
+	trycounter = NBuffers;
+	for (;;)
+	{
+		buf = GetBufferDescriptor(ClockSweepTick());
 
-	SpinLockAcquire(&S3GhostQueue->ring_buffer_lock);
-	bool searchGhostQueue = RingBufferDeleteTag(S3GhostQueue, tagHash);
-	SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
-
-	if (searchGhostQueue) {
-		// in ghost queue, add to main
-		SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
-		int evictedIdx = FifoReinsertion(S3MainQueue, tagHash, -1);
-		if (evictedIdx != -1) {
-			S3MainQueue->queue[RingBufferSearchTag(S3MainQueue, tagHash)].bufferDescIndex = evictedIdx;
-		}
-		SpinLockRelease(&S3MainQueue->ring_buffer_lock);
-
-		buf = GetBufferDescriptor(evictedIdx);
+		/*
+		 * If the buffer is pinned or has a nonzero usage_count, we cannot use
+		 * it; decrement the usage_count (unless pinned) and keep scanning.
+		 */
 		local_buf_state = LockBufHdr(buf);
-		*buf_state = local_buf_state;
-		return buf;
-	} else {
-		// not in ghost queue, add to probationary
-		SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
-		RingBufferEntry evictedFromProbationary = RingBufferEnqueue(S3ProbationaryQueue, tagHash, -1);
-		SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
 
-		if (evictedFromProbationary.tag != -1 && evictedFromProbationary.bufferDescIndex != -1) {
-			ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
+		if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0)
+		{
+			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+			{
+				local_buf_state -= BUF_USAGECOUNT_ONE;
 
-			int evictedIdx = -1;
-
-			//  If eviction has usage count > 0, fifo reinsert to main
-			if (metrics.refCount > 0 || metrics.usageCount > 0) {
-				SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
-				evictedIdx = FifoReinsertion(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
-				SpinLockRelease(&S3MainQueue->ring_buffer_lock);
-				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
-			} else { // else add tag to ghost queue
-				SpinLockAcquire(&S3GhostQueue->ring_buffer_lock);
-				RingBufferEnqueue(S3GhostQueue, evictedFromProbationary.tag, -1);
-				SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
-				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
-				evictedIdx = evictedFromProbationary.bufferDescIndex;
+				trycounter = NBuffers;
 			}
-
-			// Write buffer desc idx to probationary
-			S3ProbationaryQueue->queue[RingBufferSearchTag(S3ProbationaryQueue, tagHash)].bufferDescIndex = evictedIdx;
-
-			buf = GetBufferDescriptor(evictedIdx);
-			local_buf_state = LockBufHdr(buf);
-			*buf_state = local_buf_state;
-			return buf;
+			else
+			{
+				/* Found a usable buffer */
+				if (strategy != NULL)
+					AddBufferToRing(strategy, buf);
+				*buf_state = local_buf_state;
+				return buf;
+			}
 		}
+		else if (--trycounter == 0)
+		{
+			/*
+			 * We've scanned all the buffers without making any state changes,
+			 * so all the buffers are pinned (or were when we looked at them).
+			 * We could hope that someone will free one eventually, but it's
+			 * probably better to fail than to risk getting stuck in an
+			 * infinite loop.
+			 */
+			UnlockBufHdr(buf, local_buf_state);
+			elog(ERROR, "no unpinned buffers available");
+		}
+		UnlockBufHdr(buf, local_buf_state);
 	}
-
-
-
-	// trycounter = NBuffers;
-	// for (;;)
-	// {
-	// 	buf = GetBufferDescriptor(ClockSweepTick());
-
-	// 	/*
-	// 	 * If the buffer is pinned or has a nonzero usage_count, we cannot use
-	// 	 * it; decrement the usage_count (unless pinned) and keep scanning.
-	// 	 */
-	// 	local_buf_state = LockBufHdr(buf);
-
-	// 	if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0)
-	// 	{
-	// 		if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
-	// 		{
-	// 			local_buf_state -= BUF_USAGECOUNT_ONE;
-
-	// 			trycounter = NBuffers;
-	// 		}
-	// 		else
-	// 		{
-	// 			/* Found a usable buffer */
-	// 			if (strategy != NULL)
-	// 				AddBufferToRing(strategy, buf);
-	// 			*buf_state = local_buf_state;
-	// 			return buf;
-	// 		}
-	// 	}
-	// 	else if (--trycounter == 0)
-	// 	{
-	// 		/*
-	// 		 * We've scanned all the buffers without making any state changes,
-	// 		 * so all the buffers are pinned (or were when we looked at them).
-	// 		 * We could hope that someone will free one eventually, but it's
-	// 		 * probably better to fail than to risk getting stuck in an
-	// 		 * infinite loop.
-	// 		 */
-	// 		UnlockBufHdr(buf, local_buf_state);
-	// 		elog(ERROR, "no unpinned buffers available");
-	// 	}
-	// 	UnlockBufHdr(buf, local_buf_state);
-	// }
 }
 
 /*
@@ -762,7 +700,7 @@ StrategyInitialize(bool init)
 
 	S3ProbationaryQueue = (BufferStrategyRingBuffer *)
 		ShmemInitStruct("S3-FIFO probationary queue",
-						offsetof(BufferStrategyRingBuffer, queue) + ((1 - mainQueueSize) * sizeof(RingBufferEntry)),
+						offsetof(BufferStrategyRingBuffer, queue) + ((NBuffers - mainQueueSize) * sizeof(RingBufferEntry)),
 						&found);
 
 	S3GhostQueue = (BufferStrategyRingBuffer *)
@@ -802,18 +740,30 @@ StrategyInitialize(bool init)
 		S3MainQueue->tail = 0;
 		S3MainQueue->currentSize = 0;
 		S3MainQueue->maxSize = mainQueueSize;
+		for (int i = 0; i < S3MainQueue->maxSize; i++) {
+			S3MainQueue->queue[i].tag = -1;
+			S3MainQueue->queue[i].bufferDescIndex = -1;
+		}
 
 		SpinLockInit(&S3ProbationaryQueue->ring_buffer_lock);
 		S3ProbationaryQueue->head = 0;
 		S3ProbationaryQueue->tail = 0;
 		S3ProbationaryQueue->currentSize = 0;
-		S3ProbationaryQueue->maxSize = 1 - mainQueueSize;
+		S3ProbationaryQueue->maxSize = NBuffers - mainQueueSize;
+		for (int i = 0; i < S3ProbationaryQueue->maxSize; i++) {
+			S3ProbationaryQueue->queue[i].tag = -1;
+			S3ProbationaryQueue->queue[i].bufferDescIndex = -1;
+		}
 
-		SpinLockInit(&S3ProbationaryQueue->ring_buffer_lock);
-		S3ProbationaryQueue->head = 0;
-		S3ProbationaryQueue->tail = 0;
-		S3ProbationaryQueue->currentSize = 0;
-		S3ProbationaryQueue->maxSize = mainQueueSize;
+		SpinLockInit(&S3GhostQueue->ring_buffer_lock);
+		S3GhostQueue->head = 0;
+		S3GhostQueue->tail = 0;
+		S3GhostQueue->currentSize = 0;
+		S3GhostQueue->maxSize = mainQueueSize;
+		for (int i = 0; i < S3GhostQueue->maxSize; i++) {
+			S3GhostQueue->queue[i].tag = -1;
+			S3GhostQueue->queue[i].bufferDescIndex = -1;
+		}
 	}
 	else
 		Assert(!init);
