@@ -144,7 +144,8 @@ static inline bool IsRingBufferEmpty(BufferStrategyRingBuffer* rb) {
 static RingBufferEntry RingBufferEnqueue(BufferStrategyRingBuffer* rb, int tag, int idx) {
 	RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
 	if (IsRingBufferFull(rb)) {
-		victim = rb->queue[rb->tail];
+		victim.tag = rb->queue[rb->tail].tag;
+		victim.bufferDescIndex = rb->queue[rb->tail].bufferDescIndex;
 		rb->tail = (rb->tail + 1) % rb->maxSize;
 		rb->currentSize--;
 	}
@@ -215,7 +216,10 @@ static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int first
 		if (metrics.refCount > 0 || metrics.usageCount > 0) {
 			newTag = enqueueResult.tag;
 			newIdx = enqueueResult.bufferDescIndex;
-		} else break;
+		} else {
+			newIdx = enqueueResult.bufferDescIndex;
+			break;
+		}
 	}
 	return newIdx;
 }
@@ -448,9 +452,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
 				&& BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0)
 			{
-				if (strategy != NULL)
-					AddBufferToRing(strategy, buf);
-				*buf_state = local_buf_state;
+				UnlockBufHdr(buf, local_buf_state);
 
 				/*
 				 * First time population for s3-fifo queue
@@ -491,6 +493,11 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 						}
 					}
 				}
+
+				local_buf_state = LockBufHdr(buf);
+				if (strategy != NULL)
+					AddBufferToRing(strategy, buf);
+				*buf_state = local_buf_state;
 
 				return buf;
 			}
@@ -559,8 +566,6 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			local_buf_state = LockBufHdr(buf);
 			*buf_state = local_buf_state;
 			return buf;
-		} else {
-			elog(ERROR, "Mismatch between FIFO queues");
 		}
 	}
 
