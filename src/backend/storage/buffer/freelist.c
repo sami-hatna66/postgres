@@ -202,17 +202,25 @@ static void ZeroUsageCount(int idx) {
  * Performs FIFO-Reinsertion on the given ring buffer, 
  * using the given tag and idx as the first to insert
  * Returns the buffer descriptor index held by the evicted entry
- * TODO handle case where nothing can be evicted
 */
 static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int firstIdx) {
 	int newTag = firstTag;
 	int newIdx = firstIdx;
-	ZeroUsageCount(newIdx);
-	while (true) {
+	int bufferSize = rb->currentSize;
+	while (bufferSize > 0) {
 		RingBufferEntry enqueueResult = RingBufferEnqueue(rb, newTag, newIdx);
-		DecrementUsageCount(newIdx);
+		if (newIdx != -1) DecrementUsageCount(newIdx);
 		if (enqueueResult.tag == -1 && enqueueResult.bufferDescIndex == -1) break;
-		ReferenceUsagePair metrics = GetRefUsageCount(enqueueResult.bufferDescIndex);
+		
+		ReferenceUsagePair metrics;
+		if (enqueueResult.bufferDescIndex != -1) {
+			metrics = GetRefUsageCount(enqueueResult.bufferDescIndex);
+		} else {
+			// reinsert if not yet assigned an index (edge case)
+			metrics.refCount = 1;
+			metrics.usageCount = 1;
+		}
+
 		if (metrics.refCount > 0 || metrics.usageCount > 0) {
 			newTag = enqueueResult.tag;
 			newIdx = enqueueResult.bufferDescIndex;
@@ -220,6 +228,7 @@ static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int first
 			newIdx = enqueueResult.bufferDescIndex;
 			break;
 		}
+		bufferSize--;
 	}
 	return newIdx;
 }
@@ -507,6 +516,60 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			UnlockBufHdr(buf, local_buf_state);
 		}
 	}
+
+	/* 
+	 * If hash in ghost queue, remove from ghost and add [hash, buffer descriptor of evicted] to head of main
+	 * Else add to head of probationary
+	 * Also need to handle probationary-main crossings
+	 * Add evicted item hash to ghost queue
+	 * Return GetBufferDescriptor(bufferdescindex) of evicted item from end of probationary/main queue
+	 *        Use main if in ghost or evicted item from  prob has usage count > 0
+	 *        Use probationary if not in ghost and evicted item from prob has usage count 0
+	 * 
+	 * Will have to call RingBufferEnqueue, then modify entry with returned value
+	*/
+	SpinLockAcquire(&S3GhostQueue->ring_buffer_lock);
+	bool searchGhostQueue = RingBufferDeleteTag(S3GhostQueue, tagHash);
+	SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
+
+	if (searchGhostQueue) {
+		// in ghost queue, so add to main
+		SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
+		int evictedIdx = FifoReinsertion(S3MainQueue, tagHash, -1);
+		S3MainQueue->queue[RingBufferSearchTag(S3MainQueue, tagHash)].bufferDescIndex = evictedIdx;	
+		if (evictedIdx != -1) ZeroUsageCount(evictedIdx);
+		SpinLockRelease(&S3MainQueue->ring_buffer_lock);
+	} else {
+		// not in ghost queue, add to probationary
+		SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
+		RingBufferEntry evictedFromProbationary = RingBufferEnqueue(S3ProbationaryQueue, tagHash, -1);
+
+		if (evictedFromProbationary.tag != -1 && evictedFromProbationary.bufferDescIndex != -1) {
+			ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
+
+			int evictedIdx = -1;
+
+			//  If eviction has usage count > 0, fifo reinsert to main
+			if (metrics.refCount > 0 || metrics.usageCount > 0) {
+				SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
+				evictedIdx = FifoReinsertion(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
+				SpinLockRelease(&S3MainQueue->ring_buffer_lock);
+				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
+			} 
+			else { // else add tag to ghost queue
+				SpinLockAcquire(&S3GhostQueue->ring_buffer_lock);
+				RingBufferEnqueue(S3GhostQueue, evictedFromProbationary.tag, -1);
+				SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
+				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
+				evictedIdx = evictedFromProbationary.bufferDescIndex;
+			}
+
+			// Write buffer desc idx to probationary
+			S3ProbationaryQueue->queue[RingBufferSearchTag(S3ProbationaryQueue, tagHash)].bufferDescIndex = evictedIdx;
+		} 
+		SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
+	}
+
 
 	/* Nothing on the freelist, so run the "clock sweep" algorithm */
 	trycounter = NBuffers;
