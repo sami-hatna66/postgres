@@ -230,6 +230,7 @@ static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int first
 		}
 		bufferSize--;
 	}
+
 	return newIdx;
 }
 
@@ -487,7 +488,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				} else {
 					// not in ghost queue, add to probationary
 					SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
-					RingBufferEntry evictedFromProbationary = RingBufferEnqueue(S3ProbationaryQueue, tagHash, StrategyControl->firstFreeBuffer);
+					RingBufferEntry evictedFromProbationary = RingBufferEnqueue(S3ProbationaryQueue, tagHash, buf_idx);
 					SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
 					
 					// Handle prob-main crossing if something was evicted from prob
@@ -567,6 +568,9 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			// Write buffer desc idx to probationary
 			S3ProbationaryQueue->queue[RingBufferSearchTag(S3ProbationaryQueue, tagHash)].bufferDescIndex = evictedIdx;
 		} 
+		// else {
+		// 	ereport(LOG, errmsg("Mismatch between FIFO queues"));
+		// }
 		SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
 	}
 
