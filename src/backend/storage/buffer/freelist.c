@@ -23,7 +23,6 @@
 
 #define INT_ACCESS_ONCE(var)	((int)(*((volatile int *)&(var))))
 
-
 /*
  * The shared freelist control information.
  */
@@ -290,7 +289,7 @@ static void ZeroUsageCount(int idx) {
  * using the given tag and idx as the first to insert
  * Returns the buffer descriptor index held by the evicted entry
 */
-static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int firstIdx) {
+static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int firstIdx) {	
 	int newTag = firstTag;
 	int newIdx = firstIdx;
 	int bufferSize = rb->maxSize;
@@ -324,7 +323,6 @@ static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int first
 		for (int i = 0; i < NBuffers; i++) {
 			if (S3OrphanBufferIndexes->isIdxFree[i]) {
 				newIdx = i;
-				// ereport(LOG, errmsg("Orphan %d", newIdx));
 				S3OrphanBufferIndexes->isIdxFree[i] = false;
 				break;
 			}
@@ -607,6 +605,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			 * of 8.3, but we'd better check anyway.)
 			 */
 			local_buf_state = LockBufHdr(buf);
+
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
 				&& BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0)
 			{
@@ -640,6 +639,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 
 					// Handle prob-main crossing if something was evicted from prob
 					if (evictedFromProbationary.bufferDescIndex != -1) {
+
 						ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
 						// If eviction has usage count > 0, fifo reinsert to main
 						if (metrics.refCount > 0 || metrics.usageCount > 0) {
@@ -649,10 +649,15 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 						else { // else add tag to ghost queue
 							RingBufferEnqueue(S3GhostQueue, evictedFromProbationary.tag, -1);
 
-							// record any indexes which leak out of the queues because of eviction from probationary queue
-							SpinLockAcquire(&S3OrphanBufferIndexes->lock);
-							S3OrphanBufferIndexes->isIdxFree[evictedFromProbationary.bufferDescIndex] = true;
-							SpinLockRelease(&S3OrphanBufferIndexes->lock);
+							// Add orphaned index back onto freelist
+							SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+							BufferDesc* freeBuffer = GetBufferDescriptor(evictedFromProbationary.bufferDescIndex);
+							if (freeBuffer->freeNext == FREENEXT_NOT_IN_LIST) {
+								freeBuffer->freeNext = StrategyControl->firstFreeBuffer;
+								if (freeBuffer->freeNext < 0) StrategyControl->lastFreeBuffer = freeBuffer->buf_id;
+								StrategyControl->firstFreeBuffer = freeBuffer->buf_id;
+							}
+							SpinLockRelease(&StrategyControl->buffer_strategy_lock);
 						}
 					}
 				}
@@ -736,19 +741,19 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	CheckForDuplicateIdxs(S3ProbationaryQueue);
 
 	// ereport(LOG, errmsg("S3 Prob AFTER %d %d %d %d %d %d %d %d %d %d %d %d %d", 
-	// 	S3ProbationaryQueue->queue[0].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[1].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[2].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[3].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[4].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[5].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[6].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[7].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[8].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[9].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[10].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[11].bufferDescIdx,
-	// 	S3ProbationaryQueue->queue[12].bufferDescIdx
+	// 	S3ProbationaryQueue->queue[0].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[1].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[2].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[3].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[4].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[5].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[6].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[7].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[8].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[9].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[10].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[11].bufferDescIndex,
+	// 	S3ProbationaryQueue->queue[12].bufferDescIndex
 	// ));
 
 	SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
@@ -820,16 +825,18 @@ StrategyFreeBuffer(BufferDesc *buf)
 	 * It is possible that we are told to put something in the freelist that
 	 * is already in it; don't screw up the list if so.
 	 */
+
 	if (buf->freeNext == FREENEXT_NOT_IN_LIST)
 	{
 		// buf->freeNext = StrategyControl->firstFreeBuffer;
 		// if (buf->freeNext < 0)
 		// 	StrategyControl->lastFreeBuffer = buf->buf_id;
 		// StrategyControl->firstFreeBuffer = buf->buf_id;
-		// ereport(LOG, errmsg("Free Buffer yuh %d", buf->buf_id));
+
 		// RingBufferDeleteIdx(S3MainQueue, buf->buf_id);
 		// RingBufferDeleteIdx(S3ProbationaryQueue, buf->buf_id);
-		// ereport(LOG, errmsg("Deletion Completion"));
+
+		// Edge case for when VACUUM puts a valid buffer in the freelist, ensures FIFO-reinsertion can return something in this case
 		SpinLockAcquire(&S3OrphanBufferIndexes->lock);
 		S3OrphanBufferIndexes->isIdxFree[buf->buf_id] = true;
 		SpinLockRelease(&S3OrphanBufferIndexes->lock);
