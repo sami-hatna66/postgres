@@ -332,22 +332,24 @@ static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int first
 		SpinLockRelease(&S3OrphanBufferIndexes->lock);
 	}
 
-	if (newIdx == -1) elog(ERROR, "No unpinned buffers available");
+	if (newIdx == -1) elog(ERROR, "S3-FIFO: No unpinned buffers available");
 
 	return newIdx;
 }
 
 /*
- * Throws an error if rb contains any negative buffer indexes
- * TODO change this to check range [0, NBuffers]
+ * Throws an error if rb contains any indexes outside of range [0, NBuffers)
 */
-static void CheckForNegativeIdxs(BufferStrategyRingBuffer* rb) {
+static void CheckIdxRange(BufferStrategyRingBuffer* rb) {
 	if (IsRingBufferEmpty(rb)) ereport(LOG, errmsg("Fine"));
 	int count = rb->currentSize;
 	int idx = rb->tail;
 	while (count > 0) {
-		if (rb->queue[idx].bufferDescIndex == -1) {
-			elog(ERROR, "Negative index detected!!!");
+		if (rb->queue[idx].bufferDescIndex < 0) {
+			elog(ERROR, "S3-FIFO: Negative index detected!!!");
+			return;
+		} else if (rb->queue[idx].bufferDescIndex > NBuffers - 1) {
+			elog(ERROR, "S3-FIFO: Index larger than NBuffers detected!!!");
 			return;
 		}
 		idx = (idx + 1) % rb->maxSize;
@@ -358,9 +360,9 @@ static void CheckForNegativeIdxs(BufferStrategyRingBuffer* rb) {
 /*
  * Throws an error if rb1 and rb2 share buffer indexes
 */
-static void CheckForSharedElements(BufferStrategyRingBuffer* rb1, BufferStrategyRingBuffer* rb2) {
+static void CheckForSharedIdxs(BufferStrategyRingBuffer* rb1, BufferStrategyRingBuffer* rb2) {
 	if (!rb1 || !rb2) {
-		elog(ERROR, "Null FIFO queue");
+		elog(ERROR, "S3-FIFO: Null FIFO queue");
 	}
 
 	if (rb1->currentSize == 0 || rb2->currentSize == 0) return;
@@ -374,10 +376,33 @@ static void CheckForSharedElements(BufferStrategyRingBuffer* rb1, BufferStrategy
 			RingBufferEntry elem2 = rb2->queue[idx2];
 
 			if (elem1.bufferDescIndex == elem2.bufferDescIndex) {
-				elog(ERROR, "Shared buffer index");
+				elog(ERROR, "S3-FIFO: Shared buffer index");
 			}
 		}
 	}
+}
+
+/*
+ * Throws an error if rb contains any duplicate elements
+*/
+static void CheckForDuplicateIdxs(BufferStrategyRingBuffer *rb) {
+    if (rb == NULL) {
+        elog(ERROR, "S3-FIFO: NULL FIFO queue");
+    }
+	if (rb->currentSize <= 1) {
+		return;
+	}
+
+    for (int i = 0; i < rb->currentSize; ++i) {
+        int idx1 = (rb->head + i) % rb->maxSize;
+        for (int j = i + 1; j < rb->currentSize; ++j) {
+            int idx2 = (rb->head + j) % rb->maxSize;
+
+            if (rb->queue[idx1].bufferDescIndex == rb->queue[idx2].bufferDescIndex) {
+                elog(ERROR, "S3-FIFO: Duplicate idx");
+            }
+        }
+    }
 }
 
 /*
@@ -598,7 +623,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 
 				bool searchGhostQueue = RingBufferDeleteTag(S3GhostQueue, tagHash);
 
-				if (buf_idx == -1) elog(ERROR, "Negative index encountered on free list");
+				if (buf_idx == -1) elog(ERROR, "S3-FIFO: Negative index encountered on free list");
 
 				if (searchGhostQueue) {
 					// in ghost queue, add to main
@@ -667,8 +692,9 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 		// in ghost queue, so add to main
 		evictedIdx = FifoReinsertion(S3MainQueue, tagHash, -1);
 		int idxAfterReordering = RingBufferSearchIdx(S3MainQueue, -1);
-		if (idxAfterReordering == -1) elog(ERROR, "New entry lost in main queue");
-		if (evictedIdx == -1) elog(ERROR, "Negative index entered main queue");
+		if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in main queue");
+		if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered main queue");
+
 		S3MainQueue->queue[idxAfterReordering].bufferDescIndex = evictedIdx;
 		ZeroUsageCount(evictedIdx);
 	} else {
@@ -689,22 +715,25 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				evictedIdx = evictedFromProbationary.bufferDescIndex;
 			}
 
-			if (evictedIdx == -1) elog(ERROR, "Negative index entered probationary queue");
+			if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered probationary queue");
+
 			// Write buffer desc idx to probationary
 			int idxAfterReordering = RingBufferSearchIdx(S3ProbationaryQueue, -1);
-			if (idxAfterReordering == -1) elog(ERROR, "New entry lost in probationary queue");
+			if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in probationary queue");
 			S3ProbationaryQueue->queue[idxAfterReordering].bufferDescIndex = evictedIdx; 
 		} else {
-			elog(ERROR, "Negative index evicted from probationary queue and no orphan available");
+			elog(ERROR, "S3-FIFO: Negative index evicted from probationary queue");
 		}
 	}
 
 	// DEBUG
 	// Only enable when testing, these functions take (relatively) ages to execute
 	// Enabling these WILL cause tests to run unbearably slow if using the default shared buffer size
-	CheckForNegativeIdxs(S3MainQueue);
-	CheckForNegativeIdxs(S3ProbationaryQueue);
-	CheckForSharedElements(S3MainQueue, S3ProbationaryQueue);
+	CheckIdxRange(S3MainQueue);
+	CheckIdxRange(S3ProbationaryQueue);
+	CheckForSharedIdxs(S3MainQueue, S3ProbationaryQueue);
+	CheckForDuplicateIdxs(S3MainQueue);
+	CheckForDuplicateIdxs(S3ProbationaryQueue);
 
 	// ereport(LOG, errmsg("S3 Prob AFTER %d %d %d %d %d %d %d %d %d %d %d %d %d", 
 	// 	S3ProbationaryQueue->queue[0].bufferDescIdx,
@@ -726,7 +755,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	SpinLockRelease(&S3MainQueue->ring_buffer_lock);
 	SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
 
-	if (evictedIdx == -1) elog(ERROR, "Tried to return negative index");
+	if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Tried to return negative index");
 	buf = GetBufferDescriptor(evictedIdx);
 	local_buf_state = LockBufHdr(buf);
 	*buf_state = local_buf_state;

@@ -2217,12 +2217,12 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 	{
 		Block		buf_block;
 
-		// BufferTag newTag;
-		// uint32 newHash;
-		// InitBufferTag(&newTag, &bmr.smgr->smgr_rlocator.locator, fork, extend_upto);
-		// newHash = BufTableHashCode(&newTag);
+		BufferTag newTag;
+		uint32 newHash;
+		InitBufferTag(&newTag, &bmr.smgr->smgr_rlocator.locator, fork, extend_upto);
+		newHash = BufTableHashCode(&newTag);
 
-		buffers[i] = GetVictimBuffer(strategy, io_context, 0);
+		buffers[i] = GetVictimBuffer(strategy, io_context, newHash);
 		buf_block = BufHdrGetBlock(GetBufferDescriptor(buffers[i] - 1));
 
 		/* new buffers are zero-filled */
