@@ -74,7 +74,7 @@ typedef struct
 	int currentSize;
 	int maxSize;
 	RingBufferEntry queue[FLEXIBLE_ARRAY_MEMBER];
-} BufferStrategyRingBuffer;
+} RingBuffer;
 
 typedef struct {
 	slock_t lock;
@@ -89,9 +89,9 @@ typedef struct {
 /* Pointers to shared state */
 static BufferStrategyControl *StrategyControl = NULL;
 
-static BufferStrategyRingBuffer *S3MainQueue = NULL;
-static BufferStrategyRingBuffer *S3ProbationaryQueue = NULL;
-static BufferStrategyRingBuffer *S3GhostQueue = NULL;
+static RingBuffer *S3MainQueue = NULL;
+static RingBuffer *S3ProbationaryQueue = NULL;
+static RingBuffer *S3GhostQueue = NULL;
 
 static OrphanBufferArray *S3OrphanBufferIndexes = NULL;
 
@@ -132,14 +132,14 @@ static void AddBufferToRing(BufferAccessStrategy strategy,
 /*
  * Checks if ring buffer is full
 */
-static inline bool IsRingBufferFull(BufferStrategyRingBuffer* rb) {
+static inline bool IsRingBufferFull(RingBuffer* rb) {
 	return rb->currentSize == rb->maxSize;
 }
 
 /*
  * Checks if ring buffer is empty
 */
-static inline bool IsRingBufferEmpty(BufferStrategyRingBuffer* rb) {
+static inline bool IsRingBufferEmpty(RingBuffer* rb) {
 	return rb->currentSize == 0;
 }
 
@@ -148,7 +148,7 @@ static inline bool IsRingBufferEmpty(BufferStrategyRingBuffer* rb) {
  * If an item has to be evicted to make space, returns that item
  * Else returns {-1, -1}
 */
-static RingBufferEntry RingBufferEnqueue(BufferStrategyRingBuffer* rb, int tag, int idx) {
+static RingBufferEntry RingBufferEnqueue(RingBuffer* rb, int tag, int idx) {
 	RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
 
 	if (IsRingBufferFull(rb)) {
@@ -166,96 +166,59 @@ static RingBufferEntry RingBufferEnqueue(BufferStrategyRingBuffer* rb, int tag, 
 	return victim;
 }
 
+typedef enum {
+	RB_BY_TAG,
+	RB_BY_INDEX
+} RingBufferOperationMode;
+
 /*
- * Search ringbuffer for a tag (hash)
- * Returns index of hash in rb->queue or -1 if not found
+ * Search ringbuffer for buffer index or tag (denoted by parameter mode)
+ * Returns index of result in rb->queue or -1 if not found
 */
-static int RingBufferSearchTag(BufferStrategyRingBuffer* rb, int tag) {
+static int SearchRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode mode) {
 	if (IsRingBufferEmpty(rb)) return -1;
+
 	int count = rb->currentSize;
 	int idx = rb->tail;
 	while (count > 0) {
-		if (rb->queue[idx].tag == tag) return idx;
+		if ((mode == RB_BY_TAG && rb->queue[idx].tag == target) ||
+			(mode == RB_BY_INDEX && rb->queue[idx].bufferDescIndex == target)) {
+			return idx;
+		}
 		idx = (idx + 1) % rb->maxSize;
 		count--;
 	}
-	return -1;
+	return idx;
 }
 
 /*
- * Search ringbuffer for a buffer index
- * Returns index of buffer index in rb->queue or -1 if not found
-*/
-static int RingBufferSearchIdx(BufferStrategyRingBuffer* rb, int buf_idx) {
-	if (IsRingBufferEmpty(rb)) return -1;
-	int count = rb->currentSize;
-	int idx = rb->tail;
-	while (count > 0) {
-		if (rb->queue[idx].bufferDescIndex == buf_idx) return idx;
-		idx = (idx + 1) % rb->maxSize;
-		count--;
-	}
-	return -1;
-}
-
-/*
- * Deletes entry from ring buffer based on hash
- * Returns true if item was present and deleted, returns false if hash not found
-*/
-static bool RingBufferDeleteTag(BufferStrategyRingBuffer* rb, int tag) {
-    if (IsRingBufferEmpty(rb)) return false;
-
-    int idx = RingBufferSearchTag(rb, tag);
-    if (idx == -1) return false;
-
-    int current = idx;
-    int next = (idx + 1) % rb->maxSize;
-    while (current != rb->head) {
-        rb->queue[current] = rb->queue[next];
-        current = next;
-        next = (next + 1) % rb->maxSize;
-    }
-
-    rb->head = (rb->head + rb->maxSize - 1) % rb->maxSize;
-    rb->currentSize--;
-
-    // Handle edge case of single element
-    if (rb->currentSize == 0) {
-        rb->head = 0;
-        rb->tail = 0;
-    }
-
-    return true;
-}
-
-/*
- * Deletes entry from ring buffer based on buffer index
+ * Deletes entry from ring buffer based on buffer index or tag (denoted by parameter mode)
  * Returns true if item was present and deleted, returns false if index not found
 */
-static bool RingBufferDeleteIdx(BufferStrategyRingBuffer* rb, int target_idx) {
-    if (IsRingBufferEmpty(rb)) return false;
+static bool DeleteFromRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode mode) {
+	if (IsRingBufferEmpty(rb)) return false;
 
-    int idx = RingBufferSearchIdx(rb, target_idx);
-    if (idx == -1) return false;
+	int idx = SearchRingBuffer(rb, target, mode);
+	if (idx == -1) return false;
 
-    int current = idx;
-    int next = (idx + 1) % rb->maxSize;
-    while (current != rb->head) {
-        rb->queue[current] = rb->queue[next];
-        current = next;
-        next = (next + 1) % rb->maxSize;
-    }
+	int current = idx;
+	int next = (idx + 1) % rb->maxSize;
+	while (current != rb->head) {
+		rb->queue[current] = rb->queue[next];
+		current = next;
+		next = (next + 1) % rb->maxSize;
+	}
 
-    rb->head = (rb->head + rb->maxSize - 1) % rb->maxSize;
-    rb->currentSize--;
+	rb->head = (rb->head + rb->maxSize - 1) % rb->maxSize;
+	rb->currentSize--;
 
     // Handle edge case of single element
-    if (rb->currentSize == 0) {
-        rb->head = 0;
-        rb->tail = 0;
-    }
+	if (rb->currentSize == 0) {
+		rb->head = 0;
+		rb->tail = 0;
+	}
 
-    return true;
+	return true;
 }
 
 static ReferenceUsagePair GetRefUsageCount(int idx) {
@@ -289,7 +252,7 @@ static void ZeroUsageCount(int idx) {
  * using the given tag and idx as the first to insert
  * Returns the buffer descriptor index held by the evicted entry
 */
-static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int firstIdx) {	
+static int FifoReinsertion(RingBuffer* rb, int firstTag, int firstIdx) {	
 	int newTag = firstTag;
 	int newIdx = firstIdx;
 	int bufferSize = rb->maxSize;
@@ -338,7 +301,7 @@ static int FifoReinsertion(BufferStrategyRingBuffer* rb, int firstTag, int first
 /*
  * Throws an error if rb contains any indexes outside of range [0, NBuffers)
 */
-static void CheckIdxRange(BufferStrategyRingBuffer* rb) {
+static void CheckIdxRange(RingBuffer* rb) {
 	if (IsRingBufferEmpty(rb)) ereport(LOG, errmsg("Fine"));
 	int count = rb->currentSize;
 	int idx = rb->tail;
@@ -358,7 +321,7 @@ static void CheckIdxRange(BufferStrategyRingBuffer* rb) {
 /*
  * Throws an error if rb1 and rb2 share buffer indexes
 */
-static void CheckForSharedIdxs(BufferStrategyRingBuffer* rb1, BufferStrategyRingBuffer* rb2) {
+static void CheckForSharedIdxs(RingBuffer* rb1, RingBuffer* rb2) {
 	if (!rb1 || !rb2) {
 		elog(ERROR, "S3-FIFO: Null FIFO queue");
 	}
@@ -383,7 +346,7 @@ static void CheckForSharedIdxs(BufferStrategyRingBuffer* rb1, BufferStrategyRing
 /*
  * Throws an error if rb contains any duplicate elements
 */
-static void CheckForDuplicateIdxs(BufferStrategyRingBuffer *rb) {
+static void CheckForDuplicateIdxs(RingBuffer *rb) {
     if (rb == NULL) {
         elog(ERROR, "S3-FIFO: NULL FIFO queue");
     }
@@ -620,7 +583,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 				SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
-				bool searchGhostQueue = RingBufferDeleteTag(S3GhostQueue, tagHash);
+				bool searchGhostQueue = DeleteFromRingBuffer(S3GhostQueue, tagHash, RB_BY_TAG);
 
 				if (buf_idx == -1) elog(ERROR, "S3-FIFO: Negative index encountered on free list");
 
@@ -689,14 +652,14 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 	SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
-	bool searchGhostQueue = RingBufferDeleteTag(S3GhostQueue, tagHash);
+	bool searchGhostQueue = DeleteFromRingBuffer(S3GhostQueue, tagHash, RB_BY_TAG);
 
 	int evictedIdx = -1;
 
 	if (searchGhostQueue) {
 		// in ghost queue, so add to main
 		evictedIdx = FifoReinsertion(S3MainQueue, tagHash, -1);
-		int idxAfterReordering = RingBufferSearchIdx(S3MainQueue, -1);
+		int idxAfterReordering = SearchRingBuffer(S3MainQueue, -1, RB_BY_INDEX);
 		if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in main queue");
 		if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered main queue");
 
@@ -723,7 +686,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered probationary queue");
 
 			// Write buffer desc idx to probationary
-			int idxAfterReordering = RingBufferSearchIdx(S3ProbationaryQueue, -1);
+			int idxAfterReordering = SearchRingBuffer(S3ProbationaryQueue, -1, RB_BY_INDEX);
 			if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in probationary queue");
 			S3ProbationaryQueue->queue[idxAfterReordering].bufferDescIndex = evictedIdx; 
 		} else {
@@ -964,19 +927,19 @@ StrategyInitialize(bool init)
 						&found);
 
 	int mainQueueSize = (NBuffers * 90) / 100;
-	S3MainQueue = (BufferStrategyRingBuffer *)
+	S3MainQueue = (RingBuffer *)
 		ShmemInitStruct("S3-FIFO main queue",
-						offsetof(BufferStrategyRingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
+						offsetof(RingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
 						&found);
 
-	S3ProbationaryQueue = (BufferStrategyRingBuffer *)
+	S3ProbationaryQueue = (RingBuffer *)
 		ShmemInitStruct("S3-FIFO probationary queue",
-						offsetof(BufferStrategyRingBuffer, queue) + ((NBuffers - mainQueueSize) * sizeof(RingBufferEntry)),
+						offsetof(RingBuffer, queue) + ((NBuffers - mainQueueSize) * sizeof(RingBufferEntry)),
 						&found);
 
-	S3GhostQueue = (BufferStrategyRingBuffer *)
+	S3GhostQueue = (RingBuffer *)
 		ShmemInitStruct("S3-FIFO ghost queue",
-						offsetof(BufferStrategyRingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
+						offsetof(RingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
 						&found);
 	
 	S3OrphanBufferIndexes = (OrphanBufferArray *)

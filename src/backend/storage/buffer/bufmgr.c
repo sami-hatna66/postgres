@@ -5212,13 +5212,13 @@ CheckBufferIsPinnedOnce(Buffer buffer)
 	if (BufferIsLocal(buffer))
 	{
 		if (LocalRefCount[-buffer - 1] != 1)
-			elog(ERROR, "incorrect local pin count: %d",
+			elog(ERROR, "Loc incorrect local pin count: %d",
 				 LocalRefCount[-buffer - 1]);
 	}
 	else
 	{
 		if (GetPrivateRefCount(buffer) != 1)
-			elog(ERROR, "incorrect local pin count: %d",
+			elog(ERROR, "!Loc incorrect local pin count: %d",
 				 GetPrivateRefCount(buffer));
 	}
 }
