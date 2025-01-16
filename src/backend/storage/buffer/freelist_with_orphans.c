@@ -79,8 +79,7 @@ typedef struct
 	RingBufferEntry queue[FLEXIBLE_ARRAY_MEMBER];
 } RingBuffer;
 
-typedef struct 
-{
+typedef struct {
 	int refCount;
 	int usageCount;
 } ReferenceUsagePair;
@@ -91,6 +90,8 @@ static BufferStrategyControl *StrategyControl = NULL;
 static RingBuffer *S3MainQueue = NULL;
 static RingBuffer *S3ProbationaryQueue = NULL;
 static RingBuffer *S3GhostQueue = NULL;
+
+static RingBuffer *S3OrphanIdxs = NULL;
 
 /*
  * Private (non-shared) state for managing a ring of shared buffers to re-use.
@@ -372,6 +373,71 @@ static void CheckForDuplicateIdxs(RingBuffer *rb) {
 }
 
 /*
+ * ClockSweepTick - Helper routine for StrategyGetBuffer()
+ *
+ * Move the clock hand one buffer ahead of its current position and return the
+ * id of the buffer now under the hand.
+ */
+static inline uint32
+ClockSweepTick(void)
+{
+	uint32		victim;
+
+	/*
+	 * Atomically move hand ahead one buffer - if there's several processes
+	 * doing this, this can lead to buffers being returned slightly out of
+	 * apparent order.
+	 */
+	victim =
+		pg_atomic_fetch_add_u32(&StrategyControl->nextVictimBuffer, 1);
+
+	if (victim >= NBuffers)
+	{
+		uint32		originalVictim = victim;
+
+		/* always wrap what we look up in BufferDescriptors */
+		victim = victim % NBuffers;
+
+		/*
+		 * If we're the one that just caused a wraparound, force
+		 * completePasses to be incremented while holding the spinlock. We
+		 * need the spinlock so StrategySyncStart() can return a consistent
+		 * value consisting of nextVictimBuffer and completePasses.
+		 */
+		if (victim == 0)
+		{
+			uint32		expected;
+			uint32		wrapped;
+			bool		success = false;
+
+			expected = originalVictim + 1;
+
+			while (!success)
+			{
+				/*
+				 * Acquire the spinlock while increasing completePasses. That
+				 * allows other readers to read nextVictimBuffer and
+				 * completePasses in a consistent manner which is required for
+				 * StrategySyncStart().  In theory delaying the increment
+				 * could lead to an overflow of nextVictimBuffers, but that's
+				 * highly unlikely and wouldn't be particularly harmful.
+				 */
+				SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+
+				wrapped = expected % NBuffers;
+
+				success = pg_atomic_compare_exchange_u32(&StrategyControl->nextVictimBuffer,
+														 &expected, wrapped);
+				if (success)
+					StrategyControl->completePasses++;
+				SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+			}
+		}
+	}
+	return victim;
+}
+
+/*
  * have_free_buffer -- a lockless check to see if there is a free buffer in
  *					   buffer pool.
  *
@@ -457,6 +523,41 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	 */
 	pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocs, 1);
 
+	SpinLockAcquire(&S3OrphanIdxs->ring_buffer_lock);
+	SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
+	SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
+	if (!IsRingBufferEmpty(S3OrphanIdxs) && StrategyControl->firstFreeBuffer < 0) {
+		int freeIdx = RingBufferPop(S3OrphanIdxs).bufferDescIndex;
+
+		if (freeIdx != -1) {
+			buf = GetBufferDescriptor(freeIdx);
+			local_buf_state = LockBufHdr(buf);
+
+			if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
+				&& BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0) 
+			{
+				int idxInS3Queues = SearchRingBuffer(S3ProbationaryQueue, freeIdx, RB_BY_INDEX);
+				if (idxInS3Queues != -1) {
+					S3ProbationaryQueue->queue[idxInS3Queues].tag = tagHash;
+				} else {
+					idxInS3Queues = SearchRingBuffer(S3MainQueue, freeIdx, RB_BY_INDEX);
+					if (idxInS3Queues != -1) S3MainQueue->queue[idxInS3Queues].tag = tagHash;
+				}
+
+				SpinLockRelease(&S3OrphanIdxs->ring_buffer_lock);
+				SpinLockRelease(&S3MainQueue->ring_buffer_lock);
+				SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
+
+				*buf_state = local_buf_state;
+				return buf;
+			}
+			UnlockBufHdr(buf, local_buf_state);
+		}
+	}
+	SpinLockRelease(&S3OrphanIdxs->ring_buffer_lock);
+	SpinLockRelease(&S3MainQueue->ring_buffer_lock);
+	SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
+
 	/*
 	 * First check, without acquiring the lock, whether there's buffers in the
 	 * freelist. Since we otherwise don't require the spinlock in every
@@ -529,7 +630,13 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 
 				if (searchGhostQueue) {
 					// in ghost queue, add to main
-					FifoReinsertion(S3MainQueue, tagHash, buf_idx);
+					int evictedFromMain = FifoReinsertion(S3MainQueue, tagHash, buf_idx);
+
+					if (evictedFromMain != -1) {
+						SpinLockAcquire(&S3OrphanIdxs->ring_buffer_lock);
+						RingBufferPush(S3OrphanIdxs, -1, evictedFromMain);
+						SpinLockRelease(&S3OrphanIdxs->ring_buffer_lock);
+					}
 				} else {
 					// not in ghost queue, add to probationary
 					RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, buf_idx);
@@ -662,6 +769,51 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	local_buf_state = LockBufHdr(buf);
 	*buf_state = local_buf_state;
 	return buf;
+
+
+	// /* Nothing on the freelist, so run the "clock sweep" algorithm */
+	// trycounter = NBuffers;
+	// for (;;)
+	// {
+	// 	buf = GetBufferDescriptor(ClockSweepTick());
+
+	// 	/*
+	// 	 * If the buffer is pinned or has a nonzero usage_count, we cannot use
+	// 	 * it; decrement the usage_count (unless pinned) and keep scanning.
+	// 	 */
+	// 	local_buf_state = LockBufHdr(buf);
+
+	// 	if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0)
+	// 	{
+	// 		if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+	// 		{
+	// 			local_buf_state -= BUF_USAGECOUNT_ONE;
+
+	// 			trycounter = NBuffers;
+	// 		}
+	// 		else
+	// 		{
+	// 			/* Found a usable buffer */
+	// 			if (strategy != NULL)
+	// 				AddBufferToRing(strategy, buf);
+	// 			*buf_state = local_buf_state;
+	// 			return buf;
+	// 		}
+	// 	}
+	// 	else if (--trycounter == 0)
+	// 	{
+	// 		/*
+	// 		 * We've scanned all the buffers without making any state changes,
+	// 		 * so all the buffers are pinned (or were when we looked at them).
+	// 		 * We could hope that someone will free one eventually, but it's
+	// 		 * probably better to fail than to risk getting stuck in an
+	// 		 * infinite loop.
+	// 		 */
+	// 		UnlockBufHdr(buf, local_buf_state);
+	// 		elog(ERROR, "no unpinned buffers available");
+	// 	}
+	// 	UnlockBufHdr(buf, local_buf_state);
+	// }
 }
 
 /*
@@ -670,7 +822,26 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 void
 StrategyFreeBuffer(BufferDesc *buf)
 {
+	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+	/*
+	 * It is possible that we are told to put something in the freelist that
+	 * is already in it; don't screw up the list if so.
+	 */
 
+	if (buf->freeNext == FREENEXT_NOT_IN_LIST) {
+		// buf->freeNext = StrategyControl->firstFreeBuffer;
+		// if (buf->freeNext < 0)
+		// 	StrategyControl->lastFreeBuffer = buf->buf_id;
+		// StrategyControl->firstFreeBuffer = buf->buf_id;
+
+		// Edge case for when VACUUM puts a valid buffer in the freelist, ensures FIFO-reinsertion can return something in this case
+
+		ereport(LOG, errmsg("S3-FIFO: Free Push"));
+		SpinLockAcquire(&S3OrphanIdxs->ring_buffer_lock);
+		RingBufferPush(S3OrphanIdxs, -1, buf->buf_id);
+		SpinLockRelease(&S3OrphanIdxs->ring_buffer_lock);
+	}
+	SpinLockRelease(&StrategyControl->buffer_strategy_lock);
 }
 
 /*
@@ -804,6 +975,11 @@ StrategyInitialize(bool init)
 		ShmemInitStruct("S3-FIFO ghost queue",
 						offsetof(RingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
 						&found);
+	
+	S3OrphanIdxs = (RingBuffer *)
+		ShmemInitStruct("S3-FIFO orphaned indexes",
+						offsetof(RingBuffer, queue) + (NBuffers * sizeof(RingBufferEntry)),
+						&found);
 
 	if (!found)
 	{
@@ -861,6 +1037,16 @@ StrategyInitialize(bool init)
 		for (int i = 0; i < S3GhostQueue->maxSize; i++) {
 			S3GhostQueue->queue[i].tag = -1;
 			S3GhostQueue->queue[i].bufferDescIndex = -1;
+		}
+
+		SpinLockInit(&S3OrphanIdxs->ring_buffer_lock);
+		S3OrphanIdxs->head = 0;
+		S3OrphanIdxs->tail = 0;
+		S3OrphanIdxs->currentSize = 0;
+		S3OrphanIdxs->maxSize = NBuffers;
+		for (int i = 0; i < S3OrphanIdxs->maxSize; i++) {
+			S3OrphanIdxs->queue[i].tag = -1;
+			S3OrphanIdxs->queue[i].bufferDescIndex = -1;
 		}
 	}
 	else
