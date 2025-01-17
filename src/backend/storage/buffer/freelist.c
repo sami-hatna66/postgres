@@ -66,9 +66,9 @@ typedef struct
 /* Pointers to shared state */
 static BufferStrategyControl *StrategyControl = NULL;
 
-static RingBuffer *S3MainQueue = NULL;
-static RingBuffer *S3ProbationaryQueue = NULL;
-static RingBuffer *S3GhostQueue = NULL;
+static S3RingBuffer *S3MainQueue = NULL;
+static S3RingBuffer *S3ProbationaryQueue = NULL;
+static GhostRingBuffer *S3GhostQueue = NULL;
 
 /*
  * Private (non-shared) state for managing a ring of shared buffers to re-use.
@@ -107,7 +107,7 @@ static void AddBufferToRing(BufferAccessStrategy strategy,
 /*
  * Throws an error if rb contains any indexes outside of range [0, NBuffers)
 */
-static void CheckIdxRange(RingBuffer* rb) {
+static void CheckIdxRange(S3RingBuffer* rb) {
 	if (IsRingBufferEmpty(rb)) ereport(LOG, errmsg("Fine"));
 	int count = rb->currentSize;
 	int idx = rb->tail;
@@ -127,7 +127,7 @@ static void CheckIdxRange(RingBuffer* rb) {
 /*
  * Throws an error if rb1 and rb2 share buffer indexes
 */
-static void CheckForSharedIdxs(RingBuffer* rb1, RingBuffer* rb2) {
+static void CheckForSharedIdxs(S3RingBuffer* rb1, S3RingBuffer* rb2) {
 	if (!rb1 || !rb2) {
 		elog(ERROR, "S3-FIFO: Null FIFO queue");
 	}
@@ -136,11 +136,11 @@ static void CheckForSharedIdxs(RingBuffer* rb1, RingBuffer* rb2) {
 
 	for (int i = 0; i < rb1->currentSize; i++) {
 		int idx1 = (rb1->head + i) % rb1->maxSize;
-		RingBufferEntry elem1 = rb1->queue[idx1];
+		S3RingBufferEntry elem1 = rb1->queue[idx1];
 
 		for (int j = 0; j < rb2->currentSize; j++) {
 			int idx2 = (rb2->head + j) % rb2->maxSize;
-			RingBufferEntry elem2 = rb2->queue[idx2];
+			S3RingBufferEntry elem2 = rb2->queue[idx2];
 
 			if (elem1.bufferDescIndex == elem2.bufferDescIndex) {
 				elog(ERROR, "S3-FIFO: Shared buffer index");
@@ -152,7 +152,7 @@ static void CheckForSharedIdxs(RingBuffer* rb1, RingBuffer* rb2) {
 /*
  * Throws an error if rb contains any duplicate elements
 */
-static void CheckForDuplicateIdxs(RingBuffer *rb) {
+static void CheckForDuplicateIdxs(S3RingBuffer *rb) {
     if (rb == NULL) {
         elog(ERROR, "S3-FIFO: NULL FIFO queue");
     }
@@ -206,7 +206,6 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 {
 	BufferDesc *buf;
 	int			bgwprocno;
-	int			trycounter;
 	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
 
 	*from_ring = false;
@@ -324,7 +323,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 				SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
-				bool searchGhostQueue = DeleteFromRingBuffer(S3GhostQueue, tagHash, RB_BY_TAG);
+				bool searchGhostQueue = DeleteFromGhostRingBuffer(S3GhostQueue, tagHash);
 
 				if (buf_idx == -1) elog(ERROR, "S3-FIFO: Negative index encountered on free list");
 
@@ -333,7 +332,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 					FifoReinsertion(S3MainQueue, tagHash, buf_idx);
 				} else {
 					// not in ghost queue, add to probationary
-					RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, buf_idx);
+					S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, buf_idx);
 
 					// Handle prob-main crossing if something was evicted from prob
 					if (evictedFromProbationary.bufferDescIndex != -1) {
@@ -345,7 +344,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 							ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 						} 
 						else { // else add tag to ghost queue
-							RingBufferPush(S3GhostQueue, evictedFromProbationary.tag, -1);
+							GhostRingBufferPush(S3GhostQueue, evictedFromProbationary.tag);
 
 							// Add orphaned index back onto freelist
 							SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
@@ -387,7 +386,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 	SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
-	bool searchGhostQueue = DeleteFromRingBuffer(S3GhostQueue, tagHash, RB_BY_TAG);
+	bool searchGhostQueue = DeleteFromGhostRingBuffer(S3GhostQueue, tagHash);
 
 	int evictedIdx = -1;
 
@@ -402,7 +401,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 		ZeroUsageCount(evictedIdx);
 	} else {
 		// not in ghost queue, add to probationary
-		RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, -1);
+		S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, -1);
 
 		if (evictedFromProbationary.bufferDescIndex != -1) {
 			ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
@@ -413,7 +412,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 			}
 			else { // else add tag to ghost queue
-				RingBufferPush(S3GhostQueue, evictedFromProbationary.tag, -1);
+				GhostRingBufferPush(S3GhostQueue, evictedFromProbationary.tag);
 				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 				evictedIdx = evictedFromProbationary.bufferDescIndex;
 			}
@@ -575,19 +574,19 @@ StrategyInitialize(bool init)
 						&found);
 
 	int mainQueueSize = (NBuffers * 90) / 100;
-	S3MainQueue = (RingBuffer *)
+	S3MainQueue = (S3RingBuffer *)
 		ShmemInitStruct("S3-FIFO main queue",
-						offsetof(RingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
+						offsetof(S3RingBuffer, queue) + (mainQueueSize * sizeof(S3RingBufferEntry)),
 						&found);
 
-	S3ProbationaryQueue = (RingBuffer *)
+	S3ProbationaryQueue = (S3RingBuffer *)
 		ShmemInitStruct("S3-FIFO probationary queue",
-						offsetof(RingBuffer, queue) + ((NBuffers - mainQueueSize) * sizeof(RingBufferEntry)),
+						offsetof(S3RingBuffer, queue) + ((NBuffers - mainQueueSize) * sizeof(S3RingBufferEntry)),
 						&found);
 
-	S3GhostQueue = (RingBuffer *)
+	S3GhostQueue = (GhostRingBuffer *)
 		ShmemInitStruct("S3-FIFO ghost queue",
-						offsetof(RingBuffer, queue) + (mainQueueSize * sizeof(RingBufferEntry)),
+						offsetof(GhostRingBuffer, queue) + (mainQueueSize * sizeof(int)),
 						&found);
 
 	if (!found)
@@ -644,8 +643,7 @@ StrategyInitialize(bool init)
 		S3GhostQueue->currentSize = 0;
 		S3GhostQueue->maxSize = mainQueueSize;
 		for (int i = 0; i < S3GhostQueue->maxSize; i++) {
-			S3GhostQueue->queue[i].tag = -1;
-			S3GhostQueue->queue[i].bufferDescIndex = -1;
+			S3GhostQueue->queue[i] = -1;
 		}
 	}
 	else

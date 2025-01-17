@@ -1,12 +1,18 @@
 #include "postgres.h"
 #include "storage/buf_internals.h"
 
+/*
+ * buffer tag / buffer index pair
+*/
 typedef struct 
 {
 	int tag;
 	int bufferDescIndex;
-} RingBufferEntry;
+} S3RingBufferEntry;
 
+/*
+ * Data structure for S3-FIFO probationary and main queues
+*/
 typedef struct 
 {
 	slock_t ring_buffer_lock;
@@ -14,9 +20,12 @@ typedef struct
 	int tail;
 	int currentSize;
 	int maxSize;
-	RingBufferEntry queue[FLEXIBLE_ARRAY_MEMBER];
-} RingBuffer;
+	S3RingBufferEntry queue[FLEXIBLE_ARRAY_MEMBER];
+} S3RingBuffer;
 
+/*
+ * Data structure for returning the result of querying a page's reference and usage count
+*/
 typedef struct 
 {
 	int refCount;
@@ -26,14 +35,14 @@ typedef struct
 /*
  * Checks if ring buffer is full
 */
-static inline bool IsRingBufferFull(RingBuffer* rb) {
+static inline bool IsRingBufferFull(S3RingBuffer* rb) {
 	return rb->currentSize == rb->maxSize;
 }
 
 /*
  * Checks if ring buffer is empty
 */
-static inline bool IsRingBufferEmpty(RingBuffer* rb) {
+static inline bool IsRingBufferEmpty(S3RingBuffer* rb) {
 	return rb->currentSize == 0;
 }
 
@@ -42,8 +51,8 @@ static inline bool IsRingBufferEmpty(RingBuffer* rb) {
  * If an item has to be evicted to make space, returns that item
  * Else returns {-1, -1}
 */
-static RingBufferEntry RingBufferPush(RingBuffer* rb, int tag, int idx) {
-	RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
+static S3RingBufferEntry RingBufferPush(S3RingBuffer* rb, int tag, int idx) {
+	S3RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
 
 	if (IsRingBufferFull(rb)) {
 		victim.tag = rb->queue[rb->tail].tag;
@@ -64,8 +73,8 @@ static RingBufferEntry RingBufferPush(RingBuffer* rb, int tag, int idx) {
  * Pops and returns an element from the ring buffer tail
  * If ring buffer is empty, return {-1, -1}
 */
-static RingBufferEntry RingBufferPop(RingBuffer* rb) {
-    RingBufferEntry popped = {.tag = -1, .bufferDescIndex = -1};
+static S3RingBufferEntry RingBufferPop(S3RingBuffer* rb) {
+    S3RingBufferEntry popped = {.tag = -1, .bufferDescIndex = -1};
 
     if (IsRingBufferEmpty(rb)) {
         return popped;
@@ -90,7 +99,7 @@ typedef enum {
  * Search ringbuffer for buffer index or tag (denoted by parameter mode)
  * Returns index of result in rb->queue or -1 if not found
 */
-static int SearchRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode mode) {
+static int SearchRingBuffer(S3RingBuffer* rb, int target, RingBufferOperationMode mode) {
 	if (IsRingBufferEmpty(rb)) return -1;
 
 	int count = rb->currentSize;
@@ -103,14 +112,14 @@ static int SearchRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode 
 		idx = (idx + 1) % rb->maxSize;
 		count--;
 	}
-	return idx;
+	return -1;
 }
 
 /*
  * Deletes entry from ring buffer based on buffer index or tag (denoted by parameter mode)
  * Returns true if item was present and deleted, returns false if index not found
 */
-static bool DeleteFromRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode mode) {
+static bool DeleteFromRingBuffer(S3RingBuffer* rb, int target, RingBufferOperationMode mode) {
 	if (IsRingBufferEmpty(rb)) return false;
 
 	int idx = SearchRingBuffer(rb, target, mode);
@@ -167,12 +176,12 @@ static void ZeroUsageCount(int idx) {
  * using the given tag and idx as the first to insert
  * Returns the buffer descriptor index held by the evicted entry
 */
-static int FifoReinsertion(RingBuffer* rb, int firstTag, int firstIdx) {	
+static int FifoReinsertion(S3RingBuffer* rb, int firstTag, int firstIdx) {	
 	int newTag = firstTag;
 	int newIdx = firstIdx;
 	int bufferSize = rb->maxSize;
 	while (bufferSize > 0) {
-		RingBufferEntry enqueueResult = RingBufferPush(rb, newTag, newIdx);
+		S3RingBufferEntry enqueueResult = RingBufferPush(rb, newTag, newIdx);
 		if (newIdx != -1) DecrementUsageCount(newIdx);
 		if (enqueueResult.tag == -1 && enqueueResult.bufferDescIndex == -1) break;
 		
@@ -198,4 +207,83 @@ static int FifoReinsertion(RingBuffer* rb, int firstTag, int firstIdx) {
 	if (newIdx == -1) elog(ERROR, "S3-FIFO: No unpinned buffers available");
 
 	return newIdx;
+}
+
+
+
+
+/*
+ * Ghost ring buffer is used for the ghost queue which only
+ * needs to store buffer tags, not indexes
+*/
+typedef struct 
+{
+	slock_t ring_buffer_lock;
+	int head;
+	int tail;
+	int currentSize;
+	int maxSize;
+	int queue[FLEXIBLE_ARRAY_MEMBER];
+} GhostRingBuffer;
+
+static inline bool IsGhostRingBufferFull(GhostRingBuffer* rb) {
+    return rb->currentSize == rb->maxSize;
+}
+
+static inline bool IsGhostRingBufferEmpty(GhostRingBuffer* rb) {
+    return rb->currentSize == 0;
+}
+
+static inline bool SearchGhostRingBuffer(GhostRingBuffer* rb, int target) {
+    if (IsGhostRingBufferEmpty(rb)) return -1;
+
+    int count = rb->currentSize;
+    int idx = rb->tail;
+    while (count > 0) {
+        if (rb->queue[idx] == target) return idx;
+        idx = (idx + 1) % rb->maxSize;
+        count--;
+    }
+    return -1;
+}
+
+static bool DeleteFromGhostRingBuffer(GhostRingBuffer* rb, int target) {
+    if (IsGhostRingBufferEmpty(rb)) return false;
+
+    int idx = SearchGhostRingBuffer(rb, target);
+    if (idx == -1) return false;
+
+    int current = idx;
+    int next = (idx + 1) % rb->maxSize;
+    while (current != rb->head) {
+        rb->queue[current] = rb->queue[next];
+        current = next;
+        next = (next + 1) % rb->maxSize;
+    }
+
+    rb->head = (rb->head + rb->maxSize - 1) % rb->maxSize;
+    rb->currentSize--;
+
+    if (rb->currentSize == 0) {
+        rb->head = 0;
+        rb->tail = 0;
+    }
+
+    return true;
+}
+
+static int GhostRingBufferPush(GhostRingBuffer* rb, int value) {
+    int victim = -1;
+
+    if (IsGhostRingBufferFull(rb)) {
+        victim = rb->queue[rb->tail];
+        rb->tail = (rb->tail + 1) % rb->maxSize;
+    } else {
+        rb->currentSize++;
+    }
+
+    rb->queue[rb->head] = value;
+    rb->head = (rb->head + 1) % rb->maxSize;
+
+    return victim;
 }
