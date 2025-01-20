@@ -103,7 +103,7 @@ static int SearchRingBuffer(S3RingBuffer* rb, int target, RingBufferOperationMod
 	if (IsRingBufferEmpty(rb)) return -1;
 
 	int count = rb->currentSize;
-	int idx = rb->tail;
+	int idx = rb->head;
 	while (count > 0) {
 		if ((mode == RB_BY_TAG && rb->queue[idx].tag == target) ||
 			(mode == RB_BY_INDEX && rb->queue[idx].bufferDescIndex == target)) {
@@ -198,6 +198,7 @@ static int FifoReinsertion(S3RingBuffer* rb, int firstTag, int firstIdx) {
 			newTag = enqueueResult.tag;
 			newIdx = enqueueResult.bufferDescIndex;
 		} else {
+			newTag = enqueueResult.tag;
 			newIdx = enqueueResult.bufferDescIndex;
 			break;
 		}
@@ -224,17 +225,17 @@ typedef struct
 	int currentSize;
 	int maxSize;
 	int queue[FLEXIBLE_ARRAY_MEMBER];
-} GhostRingBuffer;
+} S3GhostRingBuffer;
 
-static inline bool IsGhostRingBufferFull(GhostRingBuffer* rb) {
+static inline bool IsGhostRingBufferFull(S3GhostRingBuffer* rb) {
     return rb->currentSize == rb->maxSize;
 }
 
-static inline bool IsGhostRingBufferEmpty(GhostRingBuffer* rb) {
+static inline bool IsGhostRingBufferEmpty(S3GhostRingBuffer* rb) {
     return rb->currentSize == 0;
 }
 
-static inline bool SearchGhostRingBuffer(GhostRingBuffer* rb, int target) {
+static inline int SearchGhostRingBuffer(S3GhostRingBuffer* rb, int target) {
     if (IsGhostRingBufferEmpty(rb)) return -1;
 
     int count = rb->currentSize;
@@ -247,7 +248,7 @@ static inline bool SearchGhostRingBuffer(GhostRingBuffer* rb, int target) {
     return -1;
 }
 
-static bool DeleteFromGhostRingBuffer(GhostRingBuffer* rb, int target) {
+static bool DeleteFromGhostRingBuffer(S3GhostRingBuffer* rb, int target) {
     if (IsGhostRingBufferEmpty(rb)) return false;
 
     int idx = SearchGhostRingBuffer(rb, target);
@@ -272,7 +273,7 @@ static bool DeleteFromGhostRingBuffer(GhostRingBuffer* rb, int target) {
     return true;
 }
 
-static int GhostRingBufferPush(GhostRingBuffer* rb, int value) {
+static int GhostRingBufferPush(S3GhostRingBuffer* rb, int value) {
     int victim = -1;
 
     if (IsGhostRingBufferFull(rb)) {

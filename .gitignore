@@ -50,3 +50,4 @@ db_log.log
 *.diffs
 *.out
 .vscode
+*.log

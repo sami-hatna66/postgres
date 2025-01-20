@@ -26,6 +26,12 @@
 
 #define INT_ACCESS_ONCE(var)	((int)(*((volatile int *)&(var))))
 
+// For enabling test logging
+#define TEST_S3_FIFO false
+
+// For enabling inline consistency checking
+#define DEBUG_S3_FIFO false
+
 /*
  * The shared freelist control information.
  */
@@ -68,7 +74,7 @@ static BufferStrategyControl *StrategyControl = NULL;
 
 static S3RingBuffer *S3MainQueue = NULL;
 static S3RingBuffer *S3ProbationaryQueue = NULL;
-static GhostRingBuffer *S3GhostQueue = NULL;
+static S3GhostRingBuffer *S3GhostQueue = NULL;
 
 /*
  * Private (non-shared) state for managing a ring of shared buffers to re-use.
@@ -104,6 +110,8 @@ static BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
 static void AddBufferToRing(BufferAccessStrategy strategy,
 							BufferDesc *buf);
 
+
+#if DEBUG_S3_FIFO
 /*
  * Throws an error if rb contains any indexes outside of range [0, NBuffers)
 */
@@ -171,6 +179,61 @@ static void CheckForDuplicateIdxs(S3RingBuffer *rb) {
         }
     }
 }
+#endif
+
+
+#if TEST_S3_FIFO
+static void RingBufferToStr(char* buffer, size_t bufferSize, S3RingBuffer* rb, size_t rbSize) {
+	size_t offset = 0;
+
+	offset += snprintf(buffer + offset, bufferSize - offset, "[");
+
+	int rbIdx = rb->head;
+	for (size_t i = 0; i < rbSize; i++) {
+		int idx = rb->queue[rbIdx].bufferDescIndex;
+		int tag = rb->queue[rbIdx].tag;
+		ReferenceUsagePair metrics = GetRefUsageCount(idx);
+		int refCount = metrics.refCount;
+		int usageCount = metrics.usageCount;
+
+		// [ buffer desc index, tag (hash) occupying idx, reference count, usage count ]
+		int written = snprintf(buffer + offset, bufferSize - offset, "[%lu,%lu,%lu,%lu],", idx, tag, refCount, usageCount);
+
+		if (written < 0 || (size_t)written >= bufferSize - offset) {
+			break;
+		}
+		offset += written;
+
+		rbIdx = (rbIdx + 1) % rb->maxSize;
+	}
+
+	snprintf(buffer + offset, bufferSize - offset, "]");
+}
+
+static void GhostRingBufferToStr(char* buffer, size_t bufferSize, S3GhostRingBuffer* rb, size_t rbSize) {
+	size_t offset = 0;
+
+	offset += snprintf(buffer + offset, bufferSize - offset, "[");
+
+	int rbIdx = rb->head;
+	for (size_t i = 0; i < rbSize; i++) {
+		int tag = rb->queue[rbIdx];
+
+		// [ tag (hash) ]
+		int written = snprintf(buffer + offset, bufferSize - offset, "%lu,", tag);
+
+		if (written < 0 || (size_t)written >= bufferSize - offset) {
+			break;
+		}
+		offset += written;
+
+		rbIdx = (rbIdx + 1) % rb->maxSize;
+	}
+
+	snprintf(buffer + offset, bufferSize - offset, "]");
+}
+#endif
+
 
 /*
  * have_free_buffer -- a lockless check to see if there is a free buffer in
@@ -386,6 +449,22 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 	SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
+	#if TEST_S3_FIFO
+	ereport(LOG, errmsg("DEBUG S3-FIFO tag %lu", tagHash));
+
+	char ghostBeforeStr[2048];
+	GhostRingBufferToStr(ghostBeforeStr, sizeof(ghostBeforeStr), S3GhostQueue, S3GhostQueue->currentSize);
+	ereport(LOG, errmsg("DEBUG S3-FIFO ghost before %s", ghostBeforeStr));
+
+	char mainBeforeStr[4096];
+	RingBufferToStr(mainBeforeStr, sizeof(mainBeforeStr), S3MainQueue, S3MainQueue->currentSize);
+	ereport(LOG, errmsg("DEBUG S3-FIFO main before %s", mainBeforeStr));
+
+	char probationaryBeforeStr[4096];
+	RingBufferToStr(probationaryBeforeStr, sizeof(probationaryBeforeStr), S3ProbationaryQueue, S3ProbationaryQueue->currentSize);
+	ereport(LOG, errmsg("DEBUG S3-FIFO probationary before %s", probationaryBeforeStr));
+	#endif
+
 	bool searchGhostQueue = DeleteFromGhostRingBuffer(S3GhostQueue, tagHash);
 
 	int evictedIdx = -1;
@@ -428,14 +507,29 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 		}
 	}
 
-	// DEBUG
-	// Only enable when testing, these functions take (relatively) ages to execute
+	// Only enable when debugging, these functions take (relatively) ages to execute
 	// Enabling these WILL cause tests to run unbearably slow if using the default shared buffer size
+	#if DEBUG_S3_FIFO
 	CheckIdxRange(S3MainQueue);
 	CheckIdxRange(S3ProbationaryQueue);
 	CheckForSharedIdxs(S3MainQueue, S3ProbationaryQueue);
 	CheckForDuplicateIdxs(S3MainQueue);
 	CheckForDuplicateIdxs(S3ProbationaryQueue);
+	#endif
+
+	#if TEST_S3_FIFO
+	char ghostAfterStr[2048];
+	GhostRingBufferToStr(ghostAfterStr, sizeof(ghostAfterStr), S3GhostQueue, S3GhostQueue->currentSize);
+	ereport(LOG, errmsg("DEBUG S3-FIFO ghost after %s", ghostAfterStr));
+
+	char mainAfterStr[4096];
+	RingBufferToStr(mainAfterStr, sizeof(mainAfterStr), S3MainQueue, S3MainQueue->currentSize);
+	ereport(LOG, errmsg("DEBUG S3-FIFO main after %s", mainAfterStr));
+
+	char probationaryAfterStr[4096];
+	RingBufferToStr(probationaryAfterStr, sizeof(probationaryAfterStr), S3ProbationaryQueue, S3ProbationaryQueue->currentSize);
+	ereport(LOG, errmsg("DEBUG S3-FIFO probationary after %s", probationaryAfterStr));
+	#endif
 
 	SpinLockRelease(&S3GhostQueue->ring_buffer_lock);
 	SpinLockRelease(&S3MainQueue->ring_buffer_lock);
@@ -584,9 +678,9 @@ StrategyInitialize(bool init)
 						offsetof(S3RingBuffer, queue) + ((NBuffers - mainQueueSize) * sizeof(S3RingBufferEntry)),
 						&found);
 
-	S3GhostQueue = (GhostRingBuffer *)
+	S3GhostQueue = (S3GhostRingBuffer *)
 		ShmemInitStruct("S3-FIFO ghost queue",
-						offsetof(GhostRingBuffer, queue) + (mainQueueSize * sizeof(int)),
+						offsetof(S3GhostRingBuffer, queue) + (mainQueueSize * sizeof(int)),
 						&found);
 
 	if (!found)
