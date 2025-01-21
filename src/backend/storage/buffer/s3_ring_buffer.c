@@ -50,8 +50,9 @@ static inline bool IsRingBufferEmpty(S3RingBuffer* rb) {
  * Adds a new element to the ring buffer head
  * If an item has to be evicted to make space, returns that item
  * Else returns {-1, -1}
+ * If resultPtr is not null, assign resultPtr to newly inserted entry
 */
-static S3RingBufferEntry RingBufferPush(S3RingBuffer* rb, int tag, int idx) {
+static S3RingBufferEntry RingBufferPush(S3RingBuffer* rb, S3RingBufferEntry newEntry, S3RingBufferEntry** resultPtr) {
 	S3RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
 
 	if (IsRingBufferFull(rb)) {
@@ -62,8 +63,12 @@ static S3RingBufferEntry RingBufferPush(S3RingBuffer* rb, int tag, int idx) {
 		rb->currentSize++;
 	}
 
-	rb->queue[rb->head].tag = tag;
-	rb->queue[rb->head].bufferDescIndex = idx;
+	rb->queue[rb->head] = newEntry;
+
+	if (resultPtr != NULL) {
+		*resultPtr = &(rb->queue[rb->head]);
+	}
+
 	rb->head = (rb->head + 1) % rb->maxSize;
 
 	return victim;
@@ -175,39 +180,39 @@ static void ZeroUsageCount(int idx) {
  * Performs FIFO-Reinsertion on the given ring buffer, 
  * using the given tag and idx as the first to insert
  * Returns the buffer descriptor index held by the evicted entry
+ * If resultPtr is not null, assign resultPtr to newly inserted firstEntry
 */
-static int FifoReinsertion(S3RingBuffer* rb, int firstTag, int firstIdx) {	
-	int newTag = firstTag;
-	int newIdx = firstIdx;
+static int FifoReinsertion(S3RingBuffer* rb, S3RingBufferEntry firstEntry, S3RingBufferEntry** resultPtr) {	
+	S3RingBufferEntry newEntry = firstEntry;
 	int bufferSize = rb->maxSize;
+	bool isFirstIter = true;
 	while (bufferSize > 0) {
-		S3RingBufferEntry enqueueResult = RingBufferPush(rb, newTag, newIdx);
-		if (newIdx != -1) DecrementUsageCount(newIdx);
+		S3RingBufferEntry enqueueResult = RingBufferPush(rb, newEntry, isFirstIter ? resultPtr : NULL);
+		if (newEntry.bufferDescIndex != -1) DecrementUsageCount(newEntry.bufferDescIndex);
 		if (enqueueResult.tag == -1 && enqueueResult.bufferDescIndex == -1) break;
+		isFirstIter = false;
 		
 		ReferenceUsagePair metrics;
 		if (enqueueResult.bufferDescIndex != -1) {
 			metrics = GetRefUsageCount(enqueueResult.bufferDescIndex);
-		} else if (enqueueResult.tag == firstTag) {
+		} else if (enqueueResult.tag == firstEntry.tag) {
 			// reinsert if not yet assigned an index (edge case)
 			metrics.refCount = 1;
 			metrics.usageCount = 1;
 		}
 
 		if (metrics.refCount > 0 || metrics.usageCount > 0) {
-			newTag = enqueueResult.tag;
-			newIdx = enqueueResult.bufferDescIndex;
+			newEntry = enqueueResult;
 		} else {
-			newTag = enqueueResult.tag;
-			newIdx = enqueueResult.bufferDescIndex;
+			newEntry = enqueueResult;
 			break;
 		}
 		bufferSize--;
 	}
 
-	if (newIdx == -1) elog(ERROR, "S3-FIFO: No unpinned buffers available");
+	if (newEntry.bufferDescIndex == -1) elog(ERROR, "S3-FIFO: No unpinned buffers available");
 
-	return newIdx;
+	return newEntry.bufferDescIndex;
 }
 
 

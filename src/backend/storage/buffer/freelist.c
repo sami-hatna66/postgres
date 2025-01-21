@@ -392,10 +392,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 
 				if (searchGhostQueue) {
 					// in ghost queue, add to main
-					FifoReinsertion(S3MainQueue, tagHash, buf_idx);
+					FifoReinsertion(S3MainQueue, (S3RingBufferEntry){tagHash, buf_idx}, NULL);
 				} else {
 					// not in ghost queue, add to probationary
-					S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, buf_idx);
+					S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, (S3RingBufferEntry){tagHash, buf_idx}, NULL);
 
 					// Handle prob-main crossing if something was evicted from prob
 					if (evictedFromProbationary.bufferDescIndex != -1) {
@@ -403,8 +403,9 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 						ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
 						// If eviction has usage count > 0, fifo reinsert to main
 						if (metrics.refCount > 0 || metrics.usageCount > 0) {
-							FifoReinsertion(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
+							// may cause problems, if it does need to create a new S3RingBufferEntry
 							ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
+							FifoReinsertion(S3MainQueue, evictedFromProbationary, NULL);
 						} 
 						else { // else add tag to ghost queue
 							GhostRingBufferPush(S3GhostQueue, evictedFromProbationary.tag);
@@ -471,23 +472,27 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 
 	if (searchGhostQueue) {
 		// in ghost queue, so add to main
-		evictedIdx = FifoReinsertion(S3MainQueue, tagHash, -1);
-		int idxAfterReordering = SearchRingBuffer(S3MainQueue, -1, RB_BY_INDEX);
-		if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in main queue");
+		S3RingBufferEntry newEntry = {tagHash, -1};
+		S3RingBufferEntry* ptrAfterInsertion = &newEntry;
+		
+		evictedIdx = FifoReinsertion(S3MainQueue, newEntry, &ptrAfterInsertion);
 		if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered main queue");
 
-		S3MainQueue->queue[idxAfterReordering].bufferDescIndex = evictedIdx;
+		if (ptrAfterInsertion->bufferDescIndex != -1) elog(ERROR, "S3-FIFO: result ptr points to wrong entry in main");
+		ptrAfterInsertion->bufferDescIndex = evictedIdx;
 		ZeroUsageCount(evictedIdx);
 	} else {
 		// not in ghost queue, add to probationary
-		S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, -1);
+		S3RingBufferEntry newEntry = {tagHash, -1};
+		S3RingBufferEntry* ptrAfterInsertion = &newEntry;
+		S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, newEntry, &ptrAfterInsertion);
 
 		if (evictedFromProbationary.bufferDescIndex != -1) {
 			ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
 
 			// If eviction has usage count > 0, fifo reinsert to main
 			if (metrics.refCount > 0 || metrics.usageCount > 0) {
-				evictedIdx = FifoReinsertion(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
+				evictedIdx = FifoReinsertion(S3MainQueue, (S3RingBufferEntry){evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex}, NULL);
 				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 			}
 			else { // else add tag to ghost queue
@@ -499,9 +504,8 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered probationary queue");
 
 			// Write buffer desc idx to probationary
-			int idxAfterReordering = SearchRingBuffer(S3ProbationaryQueue, -1, RB_BY_INDEX);
-			if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in probationary queue");
-			S3ProbationaryQueue->queue[idxAfterReordering].bufferDescIndex = evictedIdx; 
+			if (ptrAfterInsertion->bufferDescIndex != -1) elog(ERROR, "S3-FIFO: result ptr points to wrong entry in probationary");
+			ptrAfterInsertion->bufferDescIndex = evictedIdx;
 		} else {
 			elog(ERROR, "S3-FIFO: Negative index evicted from probationary queue");
 		}
