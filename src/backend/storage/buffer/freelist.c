@@ -23,6 +23,8 @@
 
 #define INT_ACCESS_ONCE(var)	((int)(*((volatile int *)&(var))))
 
+// For enabling logging of average time to evaluate buffer replacement policy
+#define LOG_AVG_EXEC_TIME false
 
 /*
  * The shared freelist control information.
@@ -63,6 +65,11 @@ typedef struct
 
 /* Pointers to shared state */
 static BufferStrategyControl *StrategyControl = NULL;
+
+#if LOG_AVG_EXEC_TIME
+static double avgExecTime = 0;
+static double numExecTimesLogged = 0;
+#endif
 
 /*
  * Private (non-shared) state for managing a ring of shared buffers to re-use.
@@ -202,6 +209,11 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 
 	*from_ring = false;
 
+	#if LOG_AVG_EXEC_TIME
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	#endif
+
 	/*
 	 * If given a strategy object, see whether it can select a buffer. We
 	 * assume strategy objects don't need buffer_strategy_lock.
@@ -305,6 +317,16 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
+				#if LOG_AVG_EXEC_TIME
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				long long execTimeNS = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
+				double execTimeUS = execTimeNS / 1000.0;
+				numExecTimesLogged++;
+				avgExecTime = ((avgExecTime * (numExecTimesLogged - 1)) + execTimeUS) / numExecTimesLogged;
+				ereport(LOG, errmsg("VANILLA: average time to evaluate replacement policy = %f microseconds", avgExecTime));
+				#endif
+
 				return buf;
 			}
 			UnlockBufHdr(buf, local_buf_state);
@@ -337,6 +359,16 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
+				#if LOG_AVG_EXEC_TIME
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				long long execTimeNS = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
+				double execTimeUS = execTimeNS / 1000.0;
+				numExecTimesLogged++;
+				avgExecTime = ((avgExecTime * (numExecTimesLogged - 1)) + execTimeUS) / numExecTimesLogged;
+				ereport(LOG, errmsg("VANILLA: average time to evaluate replacement policy = %f microseconds", avgExecTime));
+				#endif
+
 				return buf;
 			}
 		}

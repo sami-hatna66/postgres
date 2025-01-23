@@ -43,3 +43,11 @@ lib*.pc
 /Release/
 /tmp_install/
 /portlock/
+
+build/
+.DS_STORE
+*/.DS_STORE
+db_log.log
+*.diffs
+*.out
+.vscode
