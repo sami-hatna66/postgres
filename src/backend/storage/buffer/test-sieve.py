@@ -45,6 +45,7 @@ def run_sieve(before, hand):
     buffer = before
 
     while True:
+        # [ buffer desc index, reference count, usage count ]
         idx = buffer[hand][0]
         ref = buffer[hand][1]
         usage = buffer[hand][2]

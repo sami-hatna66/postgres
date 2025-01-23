@@ -23,7 +23,11 @@
 
 #define INT_ACCESS_ONCE(var)	((int)(*((volatile int *)&(var))))
 
-#define DEBUG_SIEVE false
+// For enabling test logging
+#define TEST_SIEVE false
+
+// For enabling logging of average time to evaluate buffer replacement policy
+#define LOG_AVG_EXEC_TIME false
 
 /*
  * The shared freelist control information.
@@ -67,6 +71,11 @@ typedef struct
 /* Pointers to shared state */
 static BufferStrategyControl *StrategyControl = NULL;
 
+#if LOG_AVG_EXEC_TIME
+static double avgExecTime = 0;
+static double numExecTimesLogged = 0;
+#endif
+
 /*
  * Private (non-shared) state for managing a ring of shared buffers to re-use.
  * This is currently the only kind of BufferAccessStrategy object, but someday
@@ -101,7 +110,7 @@ static BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
 static void AddBufferToRing(BufferAccessStrategy strategy,
 							BufferDesc *buf);
 
-#if DEBUG_SIEVE
+#if TEST_SIEVE
 static uint32 GetRefCount(uint32 idx) {
 	BufferDesc* newBuf = GetBufferDescriptor(idx);
 	uint32 newBufState = LockBufHdr(newBuf);
@@ -128,6 +137,7 @@ static void arrayToStr(char* buffer, size_t bufferSize, uint32* arr, size_t arrS
 		uint32 refCount = GetRefCount(idx);
 		uint32 usageCount = GetUsageCount(idx);
 
+		// [ buffer desc index, reference count, usage count ]
 		int written = snprintf(buffer + offset, bufferSize - offset, "[%d,%d,%d],", idx, refCount, usageCount);
 
 		if (written < 0 || (size_t)written >= bufferSize - offset) {
@@ -247,6 +257,11 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 
 	*from_ring = false;
 
+	#if LOG_AVG_EXEC_TIME
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	#endif
+
 	/*
 	 * If given a strategy object, see whether it can select a buffer. We
 	 * assume strategy objects don't need buffer_strategy_lock.
@@ -350,13 +365,23 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
+				#if LOG_AVG_EXEC_TIME
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				long long execTimeNS = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
+				double execTimeUS = execTimeNS / 1000.0;
+				numExecTimesLogged++;
+				avgExecTime = ((avgExecTime * (numExecTimesLogged - 1)) + execTimeUS) / numExecTimesLogged;
+				ereport(LOG, errmsg("SIEVE: average time to evaluate replacement policy = %f microseconds", avgExecTime));
+				#endif
+
 				return buf;
 			}
 			UnlockBufHdr(buf, local_buf_state);
 		}
 	}
 	
-	#if DEBUG_SIEVE
+	#if TEST_SIEVE
 	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 	char printStr[2048];
 	arrayToStr(printStr, sizeof(printStr), StrategyControl->victimOrderings, NBuffers);
@@ -403,7 +428,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				memmove(&StrategyControl->victimOrderings[1], &StrategyControl->victimOrderings[0], orderingIndex * sizeof(int));
 				StrategyControl->victimOrderings[0] = temp;
 
-				#if DEBUG_SIEVE
+				#if TEST_SIEVE
 				char printStr[2048];
 				UnlockBufHdr(buf, local_buf_state);
 				arrayToStr(printStr, sizeof(printStr), StrategyControl->victimOrderings, NBuffers);
@@ -412,6 +437,15 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				#endif
 				
 				SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+
+				#if LOG_AVG_EXEC_TIME
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				long long execTimeNS = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
+				double execTimeUS = execTimeNS / 1000.0;
+				numExecTimesLogged++;
+				avgExecTime = ((avgExecTime * (numExecTimesLogged - 1)) + execTimeUS) / numExecTimesLogged;
+				ereport(LOG, errmsg("SIEVE: average time to evaluate replacement policy = %f microseconds", avgExecTime));
+				#endif
 
 				return buf;
 			}
@@ -563,7 +597,7 @@ StrategyInitialize(bool init)
 	 */
 	InitBufTable(NBuffers + NUM_BUFFER_PARTITIONS);
 	
-	#if DEBUG_SIEVE
+	#if TEST_SIEVE
 	ereport(LOG, errmsg("DEBUG SIEVE NBuffers = %d", NBuffers));
 	#endif
 
@@ -604,6 +638,11 @@ StrategyInitialize(bool init)
 		for (int i = 0; i < NBuffers; i++) {
 			StrategyControl->victimOrderings[i] = i;
 		}
+
+		#if LOG_AVG_EXEC_TIME
+		avgExecTime = 0;
+		numExecTimesLogged = 0;
+		#endif
 	}
 	else
 		Assert(!init);
