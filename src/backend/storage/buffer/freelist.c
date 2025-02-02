@@ -570,6 +570,9 @@ StrategyShmemSize(void)
 	/* size of the shared replacement strategy control block */
 	size = add_size(size, MAXALIGN(sizeof(BufferStrategyControl)));
 
+	// size of SIEVE victim orderings array
+	size = add_size(size, NBuffers * sizeof(uint32));
+
 	return size;
 }
 
