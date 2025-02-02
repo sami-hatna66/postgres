@@ -148,6 +148,8 @@ CalculateShmemSize(int *num_semaphores)
 	size = add_size(size, WaitEventCustomShmemSize());
 	size = add_size(size, InjectionPointShmemSize());
 	size = add_size(size, SlotSyncShmemSize());
+	
+	size = add_size(size, NBuffers * sizeof(uint32));
 
 	/* include additional requested shmem from preload libraries */
 	size = add_size(size, total_addin_request);
