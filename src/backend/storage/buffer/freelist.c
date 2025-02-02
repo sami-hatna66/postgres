@@ -35,7 +35,6 @@
 #define DEBUG_S3_FIFO false
 
 // For enabling logging of average time to evaluate buffer replacement policy
-// (TODO, investigate what functions postgres gives you for this)
 #define LOG_AVG_EXEC_TIME false
 
 /*
@@ -671,6 +670,12 @@ StrategyShmemSize(void)
 
 	/* size of the shared replacement strategy control block */
 	size = add_size(size, MAXALIGN(sizeof(BufferStrategyControl)));
+
+	// size of s3-fifo control structures
+	int mainQueueSize = (NBuffers * 90) / 100;
+	size = add_size(size, MAXALIGN(sizeof(S3RingBuffer) + (mainQueueSize * sizeof(S3RingBufferEntry))));
+	size = add_size(size, MAXALIGN(sizeof(S3RingBuffer) + ((NBuffers - mainQueueSize) * sizeof(S3RingBufferEntry))));
+	size = add_size(size, MAXALIGN(sizeof(S3GhostRingBuffer) + (mainQueueSize * sizeof(int))));
 
 	return size;
 }
