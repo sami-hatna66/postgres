@@ -29,6 +29,9 @@
 // For enabling logging of average time to evaluate buffer replacement policy
 #define LOG_AVG_EXEC_TIME false
 
+// For enabling logging of clock hand position
+#define LOG_HAND_POSITION false
+
 /*
  * The shared freelist control information.
  */
@@ -212,6 +215,11 @@ ClockSweepTick(void)
 			}
 		}
 	}
+
+	#if LOG_HAND_POSITION
+	ereport(LOG, errmsg("SIEVE: hand pos = %d", victim));
+	#endif
+
 	return victim;
 }
 
