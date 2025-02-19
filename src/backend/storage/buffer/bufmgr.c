@@ -78,6 +78,10 @@
 
 #define RELS_BSEARCH_THRESHOLD		20
 
+// For enabling logging of clock hand position
+// [MUST ALSO BE ENABLED IN FREELIST]
+#define LOG_HAND_POSITION false
+
 /*
  * This is the size (in the number of blocks) above which we scan the
  * entire buffer pool to remove the buffers for all the pages of relation
@@ -745,6 +749,10 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 Buffer
 ReadBuffer(Relation reln, BlockNumber blockNum)
 {
+	#if LOG_HAND_POSITION
+	ereport(LOG, errmsg("SIEVE: hand pos = tick"));
+	#endif
+
 	return ReadBufferExtended(reln, MAIN_FORKNUM, blockNum, RBM_NORMAL, NULL);
 }
 

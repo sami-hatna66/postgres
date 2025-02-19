@@ -30,6 +30,7 @@
 #define LOG_AVG_EXEC_TIME false
 
 // For enabling logging of clock hand position
+// [MUST ALSO BE ENABLED IN BUFMGR]
 #define LOG_HAND_POSITION false
 
 /*
