@@ -130,14 +130,14 @@ static void AddBufferToRing(BufferAccessStrategy strategy,
 /*
  * Checks if ring buffer is full
 */
-static inline bool IsRingBufferFull(RingBuffer* rb) {
+static inline bool S3RingBuffer_IsFull(RingBuffer* rb) {
 	return rb->currentSize == rb->maxSize;
 }
 
 /*
  * Checks if ring buffer is empty
 */
-static inline bool IsRingBufferEmpty(RingBuffer* rb) {
+static inline bool S3RingBuffer_IsEmpty(RingBuffer* rb) {
 	return rb->currentSize == 0;
 }
 
@@ -146,10 +146,10 @@ static inline bool IsRingBufferEmpty(RingBuffer* rb) {
  * If an item has to be evicted to make space, returns that item
  * Else returns {-1, -1}
 */
-static RingBufferEntry RingBufferPush(RingBuffer* rb, int tag, int idx) {
+static RingBufferEntry S3RingBuffer_Enqueue(RingBuffer* rb, int tag, int idx) {
 	RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
 
-	if (IsRingBufferFull(rb)) {
+	if (S3RingBuffer_IsFull(rb)) {
 		victim.tag = rb->queue[rb->tail].tag;
 		victim.bufferDescIndex = rb->queue[rb->tail].bufferDescIndex;
 		rb->tail = (rb->tail + 1) % rb->maxSize;
@@ -168,21 +168,21 @@ static RingBufferEntry RingBufferPush(RingBuffer* rb, int tag, int idx) {
  * Pops and returns an element from the ring buffer tail
  * If ring buffer is empty, return {-1, -1}
 */
-static RingBufferEntry RingBufferPop(RingBuffer* rb) {
-    RingBufferEntry popped = {.tag = -1, .bufferDescIndex = -1};
+static RingBufferEntry S3RingBuffer_Dequeue(RingBuffer* rb) {
+    RingBufferEntry dequeued = {.tag = -1, .bufferDescIndex = -1};
 
-    if (IsRingBufferEmpty(rb)) {
-        return popped;
+    if (S3RingBuffer_IsEmpty(rb)) {
+        return dequeued;
     }
 
-    popped.tag = rb->queue[rb->tail].tag;
-    popped.bufferDescIndex = rb->queue[rb->tail].bufferDescIndex;
+    dequeued.tag = rb->queue[rb->tail].tag;
+    dequeued.bufferDescIndex = rb->queue[rb->tail].bufferDescIndex;
 
     rb->tail = (rb->tail + 1) % rb->maxSize;
 
     rb->currentSize--;
 
-    return popped;
+    return dequeued;
 }
 
 typedef enum {
@@ -194,8 +194,8 @@ typedef enum {
  * Search ringbuffer for buffer index or tag (denoted by parameter mode)
  * Returns index of result in rb->queue or -1 if not found
 */
-static int SearchRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode mode) {
-	if (IsRingBufferEmpty(rb)) return -1;
+static int S3RingBuffer_Search(RingBuffer* rb, int target, RingBufferOperationMode mode) {
+	if (S3RingBuffer_IsEmpty(rb)) return -1;
 
 	int count = rb->currentSize;
 	int idx = rb->tail;
@@ -214,10 +214,10 @@ static int SearchRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode 
  * Deletes entry from ring buffer based on buffer index or tag (denoted by parameter mode)
  * Returns true if item was present and deleted, returns false if index not found
 */
-static bool DeleteFromRingBuffer(RingBuffer* rb, int target, RingBufferOperationMode mode) {
-	if (IsRingBufferEmpty(rb)) return false;
+static bool S3RingBuffer_Delete(RingBuffer* rb, int target, RingBufferOperationMode mode) {
+	if (S3RingBuffer_IsEmpty(rb)) return false;
 
-	int idx = SearchRingBuffer(rb, target, mode);
+	int idx = S3RingBuffer_Search(rb, target, mode);
 	if (idx == -1) return false;
 
 	int current = idx;
@@ -271,12 +271,12 @@ static void ZeroUsageCount(int idx) {
  * using the given tag and idx as the first to insert
  * Returns the buffer descriptor index held by the evicted entry
 */
-static int FifoReinsertion(RingBuffer* rb, int firstTag, int firstIdx) {	
+static int FifoReinsert(RingBuffer* rb, int firstTag, int firstIdx) {	
 	int newTag = firstTag;
 	int newIdx = firstIdx;
 	int bufferSize = rb->maxSize;
 	while (bufferSize > 0) {
-		RingBufferEntry enqueueResult = RingBufferPush(rb, newTag, newIdx);
+		RingBufferEntry enqueueResult = S3RingBuffer_Enqueue(rb, newTag, newIdx);
 		if (newIdx != -1) DecrementUsageCount(newIdx);
 		if (enqueueResult.tag == -1 && enqueueResult.bufferDescIndex == -1) break;
 		
@@ -308,7 +308,7 @@ static int FifoReinsertion(RingBuffer* rb, int firstTag, int firstIdx) {
  * Throws an error if rb contains any indexes outside of range [0, NBuffers)
 */
 static void CheckIdxRange(RingBuffer* rb) {
-	if (IsRingBufferEmpty(rb)) ereport(LOG, errmsg("Fine"));
+	if (S3RingBuffer_IsEmpty(rb)) ereport(LOG, errmsg("Fine"));
 	int count = rb->currentSize;
 	int idx = rb->tail;
 	while (count > 0) {
@@ -526,8 +526,8 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	SpinLockAcquire(&S3OrphanIdxs->ring_buffer_lock);
 	SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 	SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
-	if (!IsRingBufferEmpty(S3OrphanIdxs) && StrategyControl->firstFreeBuffer < 0) {
-		int freeIdx = RingBufferPop(S3OrphanIdxs).bufferDescIndex;
+	if (!S3RingBuffer_IsEmpty(S3OrphanIdxs) && StrategyControl->firstFreeBuffer < 0) {
+		int freeIdx = S3RingBuffer_Dequeue(S3OrphanIdxs).bufferDescIndex;
 
 		if (freeIdx != -1) {
 			buf = GetBufferDescriptor(freeIdx);
@@ -536,11 +536,11 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
 				&& BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0) 
 			{
-				int idxInS3Queues = SearchRingBuffer(S3ProbationaryQueue, freeIdx, RB_BY_INDEX);
+				int idxInS3Queues = S3RingBuffer_Search(S3ProbationaryQueue, freeIdx, RB_BY_INDEX);
 				if (idxInS3Queues != -1) {
 					S3ProbationaryQueue->queue[idxInS3Queues].tag = tagHash;
 				} else {
-					idxInS3Queues = SearchRingBuffer(S3MainQueue, freeIdx, RB_BY_INDEX);
+					idxInS3Queues = S3RingBuffer_Search(S3MainQueue, freeIdx, RB_BY_INDEX);
 					if (idxInS3Queues != -1) S3MainQueue->queue[idxInS3Queues].tag = tagHash;
 				}
 
@@ -624,22 +624,22 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 				SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
-				bool searchGhostQueue = DeleteFromRingBuffer(S3GhostQueue, tagHash, RB_BY_TAG);
+				bool searchGhostQueue = S3RingBuffer_Delete(S3GhostQueue, tagHash, RB_BY_TAG);
 
 				if (buf_idx == -1) elog(ERROR, "S3-FIFO: Negative index encountered on free list");
 
 				if (searchGhostQueue) {
 					// in ghost queue, add to main
-					int evictedFromMain = FifoReinsertion(S3MainQueue, tagHash, buf_idx);
+					int evictedFromMain = FifoReinsert(S3MainQueue, tagHash, buf_idx);
 
 					if (evictedFromMain != -1) {
 						SpinLockAcquire(&S3OrphanIdxs->ring_buffer_lock);
-						RingBufferPush(S3OrphanIdxs, -1, evictedFromMain);
+						S3RingBuffer_Enqueue(S3OrphanIdxs, -1, evictedFromMain);
 						SpinLockRelease(&S3OrphanIdxs->ring_buffer_lock);
 					}
 				} else {
 					// not in ghost queue, add to probationary
-					RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, buf_idx);
+					RingBufferEntry evictedFromProbationary = S3RingBuffer_Enqueue(S3ProbationaryQueue, tagHash, buf_idx);
 
 					// Handle prob-main crossing if something was evicted from prob
 					if (evictedFromProbationary.bufferDescIndex != -1) {
@@ -647,11 +647,11 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 						ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
 						// If eviction has usage count > 0, fifo reinsert to main
 						if (metrics.refCount > 0 || metrics.usageCount > 0) {
-							FifoReinsertion(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
+							FifoReinsert(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
 							ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 						} 
 						else { // else add tag to ghost queue
-							RingBufferPush(S3GhostQueue, evictedFromProbationary.tag, -1);
+							S3RingBuffer_Enqueue(S3GhostQueue, evictedFromProbationary.tag, -1);
 
 							// Add orphaned index back onto freelist
 							SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
@@ -693,14 +693,14 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 	SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
-	bool searchGhostQueue = DeleteFromRingBuffer(S3GhostQueue, tagHash, RB_BY_TAG);
+	bool searchGhostQueue = S3RingBuffer_Delete(S3GhostQueue, tagHash, RB_BY_TAG);
 
 	int evictedIdx = -1;
 
 	if (searchGhostQueue) {
 		// in ghost queue, so add to main
-		evictedIdx = FifoReinsertion(S3MainQueue, tagHash, -1);
-		int idxAfterReordering = SearchRingBuffer(S3MainQueue, -1, RB_BY_INDEX);
+		evictedIdx = FifoReinsert(S3MainQueue, tagHash, -1);
+		int idxAfterReordering = S3RingBuffer_Search(S3MainQueue, -1, RB_BY_INDEX);
 		if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in main queue");
 		if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered main queue");
 
@@ -708,18 +708,18 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 		ZeroUsageCount(evictedIdx);
 	} else {
 		// not in ghost queue, add to probationary
-		RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, tagHash, -1);
+		RingBufferEntry evictedFromProbationary = S3RingBuffer_Enqueue(S3ProbationaryQueue, tagHash, -1);
 
 		if (evictedFromProbationary.bufferDescIndex != -1) {
 			ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
 
 			// If eviction has usage count > 0, fifo reinsert to main
 			if (metrics.refCount > 0 || metrics.usageCount > 0) {
-				evictedIdx = FifoReinsertion(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
+				evictedIdx = FifoReinsert(S3MainQueue, evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex);
 				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 			}
 			else { // else add tag to ghost queue
-				RingBufferPush(S3GhostQueue, evictedFromProbationary.tag, -1);
+				S3RingBuffer_Enqueue(S3GhostQueue, evictedFromProbationary.tag, -1);
 				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 				evictedIdx = evictedFromProbationary.bufferDescIndex;
 			}
@@ -727,7 +727,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 			if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered probationary queue");
 
 			// Write buffer desc idx to probationary
-			int idxAfterReordering = SearchRingBuffer(S3ProbationaryQueue, -1, RB_BY_INDEX);
+			int idxAfterReordering = S3RingBuffer_Search(S3ProbationaryQueue, -1, RB_BY_INDEX);
 			if (idxAfterReordering == -1) elog(ERROR, "S3-FIFO: New entry lost in probationary queue");
 			S3ProbationaryQueue->queue[idxAfterReordering].bufferDescIndex = evictedIdx; 
 		} else {
@@ -836,9 +836,9 @@ StrategyFreeBuffer(BufferDesc *buf)
 
 		// Edge case for when VACUUM puts a valid buffer in the freelist, ensures FIFO-reinsertion can return something in this case
 
-		ereport(LOG, errmsg("S3-FIFO: Free Push"));
+		ereport(LOG, errmsg("S3-FIFO: Free Enqueue"));
 		SpinLockAcquire(&S3OrphanIdxs->ring_buffer_lock);
-		RingBufferPush(S3OrphanIdxs, -1, buf->buf_id);
+		S3RingBuffer_Push(S3OrphanIdxs, -1, buf->buf_id);
 		SpinLockRelease(&S3OrphanIdxs->ring_buffer_lock);
 	}
 	SpinLockRelease(&StrategyControl->buffer_strategy_lock);

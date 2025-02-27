@@ -7,7 +7,7 @@
 typedef struct 
 {
 	int tag;
-	int bufferDescIndex;
+	int bufferDescIndex;  // buf_id
 } S3RingBufferEntry;
 
 /*
@@ -35,14 +35,14 @@ typedef struct
 /*
  * Checks if ring buffer is full
 */
-static inline bool IsRingBufferFull(S3RingBuffer* rb) {
+static inline bool S3RingBuffer_IsFull(S3RingBuffer* rb) {
 	return rb->currentSize == rb->maxSize;
 }
 
 /*
  * Checks if ring buffer is empty
 */
-static inline bool IsRingBufferEmpty(S3RingBuffer* rb) {
+static inline bool S3RingBuffer_IsEmpty(S3RingBuffer* rb) {
 	return rb->currentSize == 0;
 }
 
@@ -52,10 +52,10 @@ static inline bool IsRingBufferEmpty(S3RingBuffer* rb) {
  * Else returns {-1, -1}
  * If resultPtr is not null, assign resultPtr to newly inserted entry
 */
-static S3RingBufferEntry RingBufferPush(S3RingBuffer* rb, S3RingBufferEntry newEntry, S3RingBufferEntry** resultPtr) {
+static S3RingBufferEntry S3RingBuffer_Enqueue(S3RingBuffer* rb, S3RingBufferEntry newEntry, S3RingBufferEntry** resultPtr) {
 	S3RingBufferEntry victim = {.tag = -1, .bufferDescIndex = -1};
 
-	if (IsRingBufferFull(rb)) {
+	if (S3RingBuffer_IsFull(rb)) {
 		victim.tag = rb->queue[rb->tail].tag;
 		victim.bufferDescIndex = rb->queue[rb->tail].bufferDescIndex;
 		rb->tail = (rb->tail + 1) % rb->maxSize;
@@ -78,21 +78,21 @@ static S3RingBufferEntry RingBufferPush(S3RingBuffer* rb, S3RingBufferEntry newE
  * Pops and returns an element from the ring buffer tail
  * If ring buffer is empty, return {-1, -1}
 */
-static S3RingBufferEntry RingBufferPop(S3RingBuffer* rb) {
-    S3RingBufferEntry popped = {.tag = -1, .bufferDescIndex = -1};
+static S3RingBufferEntry S3RingBuffer_Dequeue(S3RingBuffer* rb) {
+    S3RingBufferEntry dequeued = {.tag = -1, .bufferDescIndex = -1};
 
-    if (IsRingBufferEmpty(rb)) {
-        return popped;
+    if (S3RingBuffer_IsEmpty(rb)) {
+        return dequeued;
     }
 
-    popped.tag = rb->queue[rb->tail].tag;
-    popped.bufferDescIndex = rb->queue[rb->tail].bufferDescIndex;
+    dequeued.tag = rb->queue[rb->tail].tag;
+    dequeued.bufferDescIndex = rb->queue[rb->tail].bufferDescIndex;
 
     rb->tail = (rb->tail + 1) % rb->maxSize;
 
     rb->currentSize--;
 
-    return popped;
+    return dequeued;
 }
 
 typedef enum {
@@ -104,8 +104,8 @@ typedef enum {
  * Search ringbuffer for buffer index or tag (denoted by parameter mode)
  * Returns index of result in rb->queue or -1 if not found
 */
-static int SearchRingBuffer(S3RingBuffer* rb, int target, RingBufferOperationMode mode) {
-	if (IsRingBufferEmpty(rb)) return -1;
+static int S3RingBuffer_Search(S3RingBuffer* rb, int target, RingBufferOperationMode mode) {
+	if (S3RingBuffer_IsEmpty(rb)) return -1;
 
 	int count = rb->currentSize;
 	int idx = rb->head;
@@ -124,10 +124,10 @@ static int SearchRingBuffer(S3RingBuffer* rb, int target, RingBufferOperationMod
  * Deletes entry from ring buffer based on buffer index or tag (denoted by parameter mode)
  * Returns true if item was present and deleted, returns false if index not found
 */
-static bool DeleteFromRingBuffer(S3RingBuffer* rb, int target, RingBufferOperationMode mode) {
-	if (IsRingBufferEmpty(rb)) return false;
+static bool S3RingBuffer_Delete(S3RingBuffer* rb, int target, RingBufferOperationMode mode) {
+	if (S3RingBuffer_IsEmpty(rb)) return false;
 
-	int idx = SearchRingBuffer(rb, target, mode);
+	int idx = S3RingBuffer_Search(rb, target, mode);
 	if (idx == -1) return false;
 
 	int current = idx;
@@ -182,12 +182,12 @@ static void ZeroUsageCount(int idx) {
  * Returns the buffer descriptor index held by the evicted entry
  * If resultPtr is not null, assign resultPtr to newly inserted firstEntry
 */
-static int FifoReinsertion(S3RingBuffer* rb, S3RingBufferEntry firstEntry, S3RingBufferEntry** resultPtr) {	
+static int FifoReinsert(S3RingBuffer* rb, S3RingBufferEntry firstEntry, S3RingBufferEntry** resultPtr) {	
 	S3RingBufferEntry newEntry = firstEntry;
 	int bufferSize = rb->maxSize;
 	bool isFirstIter = true;
 	while (bufferSize > 0) {
-		S3RingBufferEntry enqueueResult = RingBufferPush(rb, newEntry, isFirstIter ? resultPtr : NULL);
+		S3RingBufferEntry enqueueResult = S3RingBuffer_Enqueue(rb, newEntry, isFirstIter ? resultPtr : NULL);
 		if (newEntry.bufferDescIndex != -1) DecrementUsageCount(newEntry.bufferDescIndex);
 		if (enqueueResult.tag == -1 && enqueueResult.bufferDescIndex == -1) break;
 		isFirstIter = false;
@@ -232,16 +232,16 @@ typedef struct
 	int queue[FLEXIBLE_ARRAY_MEMBER];
 } S3GhostRingBuffer;
 
-static inline bool IsGhostRingBufferFull(S3GhostRingBuffer* rb) {
+static inline bool GhostRingBuffer_IsFull(S3GhostRingBuffer* rb) {
     return rb->currentSize == rb->maxSize;
 }
 
-static inline bool IsGhostRingBufferEmpty(S3GhostRingBuffer* rb) {
+static inline bool GhostRingBuffer_IsEmpty(S3GhostRingBuffer* rb) {
     return rb->currentSize == 0;
 }
 
-static inline int SearchGhostRingBuffer(S3GhostRingBuffer* rb, int target) {
-    if (IsGhostRingBufferEmpty(rb)) return -1;
+static inline int GhostRingBuffer_Search(S3GhostRingBuffer* rb, int target) {
+    if (GhostRingBuffer_IsEmpty(rb)) return -1;
 
     int count = rb->currentSize;
     int idx = rb->tail;
@@ -253,10 +253,10 @@ static inline int SearchGhostRingBuffer(S3GhostRingBuffer* rb, int target) {
     return -1;
 }
 
-static bool DeleteFromGhostRingBuffer(S3GhostRingBuffer* rb, int target) {
-    if (IsGhostRingBufferEmpty(rb)) return false;
+static bool GhostRingBuffer_Delete(S3GhostRingBuffer* rb, int target) {
+    if (GhostRingBuffer_IsEmpty(rb)) return false;
 
-    int idx = SearchGhostRingBuffer(rb, target);
+    int idx = GhostRingBuffer_Search(rb, target);
     if (idx == -1) return false;
 
     int current = idx;
@@ -278,10 +278,10 @@ static bool DeleteFromGhostRingBuffer(S3GhostRingBuffer* rb, int target) {
     return true;
 }
 
-static int GhostRingBufferPush(S3GhostRingBuffer* rb, int value) {
+static int GhostRingBuffer_Enqueue(S3GhostRingBuffer* rb, int value) {
     int victim = -1;
 
-    if (IsGhostRingBufferFull(rb)) {
+    if (GhostRingBuffer_IsFull(rb)) {
         victim = rb->queue[rb->tail];
         rb->tail = (rb->tail + 1) % rb->maxSize;
     } else {

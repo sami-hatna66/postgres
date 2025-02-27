@@ -126,7 +126,7 @@ static void AddBufferToRing(BufferAccessStrategy strategy,
  * Throws an error if rb contains any indexes outside of range [0, NBuffers)
 */
 static void CheckIdxRange(S3RingBuffer* rb) {
-	if (IsRingBufferEmpty(rb)) ereport(LOG, errmsg("Fine"));
+	if (S3RingBuffer_IsEmpty(rb)) ereport(LOG, errmsg("Fine"));
 	int count = rb->currentSize;
 	int idx = rb->tail;
 	while (count > 0) {
@@ -401,16 +401,16 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				SpinLockAcquire(&S3MainQueue->ring_buffer_lock);
 				SpinLockAcquire(&S3ProbationaryQueue->ring_buffer_lock);
 
-				bool searchGhostQueue = DeleteFromGhostRingBuffer(S3GhostQueue, tagHash);
+				bool searchGhostQueue = GhostRingBuffer_Delete(S3GhostQueue, tagHash);
 
 				if (buf_idx == -1) elog(ERROR, "S3-FIFO: Negative index encountered on free list");
 
 				if (searchGhostQueue) {
 					// in ghost queue, add to main
-					FifoReinsertion(S3MainQueue, (S3RingBufferEntry){tagHash, buf_idx}, NULL);
+					FifoReinsert(S3MainQueue, (S3RingBufferEntry){tagHash, buf_idx}, NULL);
 				} else {
 					// not in ghost queue, add to probationary
-					S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, (S3RingBufferEntry){tagHash, buf_idx}, NULL);
+					S3RingBufferEntry evictedFromProbationary = S3RingBuffer_Enqueue(S3ProbationaryQueue, (S3RingBufferEntry){tagHash, buf_idx}, NULL);
 
 					// Handle prob-main crossing if something was evicted from prob
 					if (evictedFromProbationary.bufferDescIndex != -1) {
@@ -420,10 +420,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 						if (metrics.refCount > 0 || metrics.usageCount > 0) {
 							// may cause problems, if it does need to create a new S3RingBufferEntry
 							ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
-							FifoReinsertion(S3MainQueue, evictedFromProbationary, NULL);
+							FifoReinsert(S3MainQueue, evictedFromProbationary, NULL);
 						} 
 						else { // else add tag to ghost queue
-							GhostRingBufferPush(S3GhostQueue, evictedFromProbationary.tag);
+							GhostRingBuffer_Enqueue(S3GhostQueue, evictedFromProbationary.tag);
 
 							// Add orphaned index back onto freelist
 							SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
@@ -491,7 +491,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	ereport(LOG, errmsg("DEBUG S3-FIFO probationary before %s", probationaryBeforeStr));
 	#endif
 
-	bool searchGhostQueue = DeleteFromGhostRingBuffer(S3GhostQueue, tagHash);
+	bool searchGhostQueue = GhostRingBuffer_Delete(S3GhostQueue, tagHash);
 
 	int evictedIdx = -1;
 
@@ -500,7 +500,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 		S3RingBufferEntry newEntry = {tagHash, -1};
 		S3RingBufferEntry* ptrAfterInsertion = &newEntry;
 		
-		evictedIdx = FifoReinsertion(S3MainQueue, newEntry, &ptrAfterInsertion);
+		evictedIdx = FifoReinsert(S3MainQueue, newEntry, &ptrAfterInsertion);
 		if (evictedIdx == -1) elog(ERROR, "S3-FIFO: Negative index entered main queue");
 
 		if (ptrAfterInsertion->bufferDescIndex != -1) elog(ERROR, "S3-FIFO: result ptr points to wrong entry in main");
@@ -510,18 +510,18 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 		// not in ghost queue, add to probationary
 		S3RingBufferEntry newEntry = {tagHash, -1};
 		S3RingBufferEntry* ptrAfterInsertion = &newEntry;
-		S3RingBufferEntry evictedFromProbationary = RingBufferPush(S3ProbationaryQueue, newEntry, &ptrAfterInsertion);
+		S3RingBufferEntry evictedFromProbationary = S3RingBuffer_Enqueue(S3ProbationaryQueue, newEntry, &ptrAfterInsertion);
 
 		if (evictedFromProbationary.bufferDescIndex != -1) {
 			ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
 
 			// If eviction has usage count > 0, fifo reinsert to main
 			if (metrics.refCount > 0 || metrics.usageCount > 0) {
-				evictedIdx = FifoReinsertion(S3MainQueue, (S3RingBufferEntry){evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex}, NULL);
+				evictedIdx = FifoReinsert(S3MainQueue, (S3RingBufferEntry){evictedFromProbationary.tag, evictedFromProbationary.bufferDescIndex}, NULL);
 				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 			}
 			else { // else add tag to ghost queue
-				GhostRingBufferPush(S3GhostQueue, evictedFromProbationary.tag);
+				GhostRingBuffer_Enqueue(S3GhostQueue, evictedFromProbationary.tag);
 				ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 				evictedIdx = evictedFromProbationary.bufferDescIndex;
 			}
