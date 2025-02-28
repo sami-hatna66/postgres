@@ -26,6 +26,9 @@
 // For enabling test logging
 #define TEST_SIEVE false
 
+// For enabling inline consistency checking
+#define DEBUG_SIEVE false
+
 // For enabling logging of average time to evaluate buffer replacement policy
 #define LOG_AVG_EXEC_TIME false
 
@@ -436,6 +439,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				int temp = StrategyControl->victimOrderings[orderingIndex];
 				memmove(&StrategyControl->victimOrderings[1], &StrategyControl->victimOrderings[0], orderingIndex * sizeof(int));
 				StrategyControl->victimOrderings[0] = temp;
+
+				#if DEBUG_SIEVE
+				Assert(temp == StrategyControl->victimOrderings[0]);
+				#endif
 
 				#if TEST_SIEVE
 				char printStr[2048];
