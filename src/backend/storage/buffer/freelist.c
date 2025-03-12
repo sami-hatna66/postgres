@@ -418,7 +418,6 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 						ReferenceUsagePair metrics = GetRefUsageCount(evictedFromProbationary.bufferDescIndex);
 						// If eviction has usage count > 0, fifo reinsert to main
 						if (metrics.refCount > 0 || metrics.usageCount > 0) {
-							// may cause problems, if it does need to create a new S3RingBufferEntry
 							ZeroUsageCount(evictedFromProbationary.bufferDescIndex);
 							FifoReinsert(S3MainQueue, evictedFromProbationary, NULL);
 						} 
@@ -443,8 +442,6 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				SpinLockRelease(&S3ProbationaryQueue->ring_buffer_lock);
 
 				local_buf_state = LockBufHdr(buf);
-				// if (strategy != NULL)
-				// 	AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
 
 				#if LOG_AVG_EXEC_TIME
@@ -465,8 +462,8 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	/* 
 	 * If hash in ghost queue, remove from ghost and add [hash, buffer descriptor of evicted] to head of main
 	 * Else add to head of probationary
-	 * Also need to handle probationary-main crossings
-	 * Add evicted item hash to ghost queue
+	 * Handle probationary-main crossings
+	 * Add evicted item's hash to ghost queue
 	 * Return GetBufferDescriptor(bufferdescindex) of evicted item from end of probationary/main queue
 	 *        Use main if in ghost or evicted item from  prob has usage count > 0
 	 *        Use probationary if not in ghost and evicted item from prob has usage count 0
@@ -507,7 +504,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 		ptrAfterInsertion->bufferDescIndex = evictedIdx;
 		ZeroUsageCount(evictedIdx);
 	} else {
-		// not in ghost queue, add to probationary
+		// not in ghost queue, so add to probationary
 		S3RingBufferEntry newEntry = {tagHash, -1};
 		S3RingBufferEntry* ptrAfterInsertion = &newEntry;
 		S3RingBufferEntry evictedFromProbationary = S3RingBuffer_Enqueue(S3ProbationaryQueue, newEntry, &ptrAfterInsertion);
@@ -537,7 +534,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	}
 
 	// Only enable when debugging, these functions take (relatively) ages to execute
-	// Enabling these WILL cause tests to run unbearably slow if using the default shared buffer size
+	// Enabling these WILL cause tests to run unbearably slow if using larger shared buffer sizes
 	#if DEBUG_S3_FIFO
 	CheckIdxRange(S3MainQueue);
 	CheckIdxRange(S3ProbationaryQueue);
@@ -671,7 +668,7 @@ StrategyShmemSize(void)
 	/* size of the shared replacement strategy control block */
 	size = add_size(size, MAXALIGN(sizeof(BufferStrategyControl)));
 
-	// size of s3-fifo control structures
+	// account for size of s3-fifo control structures
 	int mainQueueSize = (NBuffers * 90) / 100;
 	size = add_size(size, MAXALIGN(sizeof(S3RingBuffer) + (mainQueueSize * sizeof(S3RingBufferEntry))));
 	size = add_size(size, MAXALIGN(sizeof(S3RingBuffer) + ((NBuffers - mainQueueSize) * sizeof(S3RingBufferEntry))));

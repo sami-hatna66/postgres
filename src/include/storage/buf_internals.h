@@ -75,6 +75,7 @@
  * clock sweeps to find a free buffer, so in practice we don't want the
  * value to be very large.
  */
+// Set to 3 because S3-FIFO tracks up to 3 accesses
 #define BM_MAX_USAGE_COUNT	3
 
 /*

@@ -150,6 +150,10 @@ static bool S3RingBuffer_Delete(S3RingBuffer* rb, int target, RingBufferOperatio
 	return true;
 }
 
+/*
+ * Get reference and usage count of the page at idx
+ * Returns pair of values as a ReferenceUsagePair struct
+*/
 static ReferenceUsagePair GetRefUsageCount(int idx) {
 	BufferDesc* newBuf = GetBufferDescriptor(idx);
 	uint32 newBufState = LockBufHdr(newBuf);
@@ -160,6 +164,9 @@ static ReferenceUsagePair GetRefUsageCount(int idx) {
 	return result;
 }
 
+/*
+ * Decrement the usage count of the page at idx
+*/
 static void DecrementUsageCount(int idx) {
 	BufferDesc* newBuf = GetBufferDescriptor(idx);
 	uint32 newBufState = LockBufHdr(newBuf);
@@ -167,6 +174,9 @@ static void DecrementUsageCount(int idx) {
 	UnlockBufHdr(newBuf, newBufState);
 }
 
+/*
+ * Set the usage count of the page at idx to zero
+*/
 static void ZeroUsageCount(int idx) {
 	BufferDesc* newBuf = GetBufferDescriptor(idx);
 	uint32 newBufState = LockBufHdr(newBuf);
