@@ -75,6 +75,7 @@
  * clock sweeps to find a free buffer, so in practice we don't want the
  * value to be very large.
  */
+// Set to 1 because SIEVE uses a single visited bit
 #define BM_MAX_USAGE_COUNT	1
 
 /*

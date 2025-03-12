@@ -72,6 +72,7 @@ typedef struct
 	 */
 	int			bgwprocno;
 
+	// SIEVE page orderings
 	uint32 victimOrderings[FLEXIBLE_ARRAY_MEMBER];
 } BufferStrategyControl;
 
@@ -173,6 +174,7 @@ ClockSweepTick(void)
 	 * doing this, this can lead to buffers being returned slightly out of
 	 * apparent order.
 	 */
+	// SIEVE moves from tail to head
 	victim =
 		pg_atomic_fetch_sub_u32(&StrategyControl->nextVictimBuffer, 1);
 
@@ -433,7 +435,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
 
-				/* Reorder */
+				// Reorder
 				SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 
 				int temp = StrategyControl->victimOrderings[orderingIndex];
