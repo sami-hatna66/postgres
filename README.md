@@ -1,5 +1,5 @@
-TO USE POSTGRESQL WITH SIEVE OR S3-FIFO BUFFER REPLACEMENT POLICIES,
-CHECKOUT THE sieve AND s3-fifo BRANCHES.
+TO USE POSTGRESQL WITH SIEVE OR S3-FIFO BUFFER REPLACEMENT POLICIES, CHECKOUT THE sieve AND s3-fifo BRANCHES.
+=============================================================================================================
 
 PostgreSQL Database Management System
 =====================================
